@@ -76,10 +76,9 @@ void CSpringController::ConfigUpdate()
 	lockCardinalDirections = configHandler->GetBool("CamSpringLockCardinalDirections");
 	trackMapHeight = configHandler->GetInt("CamSpringTrackMapHeightMode");
 
-	if (trackMapHeight == HeightTracking::Smooth && !modInfo.enableSmoothMesh) {
-		LOG_L(L_ERROR, "Smooth mesh disabled");
-		trackMapHeight = HeightTracking::Terrain;
-	}
+	// the smooth-mesh-disabled fallback is resolved at point of use (SmoothCamHeight):
+	// modInfo is not loaded yet when the ctor runs ConfigUpdate, and we don't want to
+	// silently rewrite the user's config value
 }
 
 void CSpringController::ConfigNotify(const std::string & key, const std::string & value)
@@ -103,7 +102,16 @@ void CSpringController::SmoothCamHeight(const float3& prevPos) {
 	// when there's a hill blocking the view
 	const float3 newGroundPos = camPos + dir * distToGround;
 	if (distToGround > 0.0f && newGroundPos.IsInBounds()) {
-		const float camHeightDiff = (trackMapHeight == HeightTracking::Smooth) ?
+		const bool wantSmoothMesh = (trackMapHeight == HeightTracking::Smooth);
+
+		// mode 2 requested but the game disabled the smooth mesh: warn once and
+		// fall back to terrain tracking; modInfo is loaded by the time we get here
+		if (wantSmoothMesh && !modInfo.enableSmoothMesh && !warnedSmoothMeshDisabled) {
+			LOG_L(L_WARNING, "[CSpringController] smoothmesh height tracking (mode 2) requested but the game disabled the smooth mesh, falling back to terrain tracking");
+			warnedSmoothMeshDisabled = true;
+		}
+
+		const float camHeightDiff = (wantSmoothMesh && modInfo.enableSmoothMesh) ?
 			smoothGround.GetHeight(pos.x, pos.z) - smoothGround.GetHeight(prevPos.x, prevPos.z) :
 			0.0f;
 

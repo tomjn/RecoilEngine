@@ -63,6 +63,8 @@ private:
 	bool doRotate;
 	bool lockCardinalDirections;
 	int trackMapHeight;
+
+	mutable bool warnedSmoothMeshDisabled = false; // one-shot log guard for the smooth-mesh-disabled fallback
 };
 
 #endif // _SPRING_CONTROLLER_H
