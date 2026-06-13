@@ -43,8 +43,9 @@ private:
 	inline float ZoomIn(const float3& curCamPos, const float3& dir, const float& curDistPre, const float& scaledMode);
 	inline float ZoomOut(const float3& curCamPos, const float3& dir, const float& curDistPre, const float& scaledMode);
 
-	void SmoothCamHeight(const float3& prevPos);
-	float GetFocusSurfaceHeight(float x, float z) const;
+	void FreezeCamHeight();
+	bool UseSmoothMesh() const;
+	float GetFocusSurfaceHeight(float x, float z, float dist) const;
 	float DistanceToFocusSurface(const float3& from) const;
 
 private:
@@ -57,6 +58,9 @@ private:
 	float fastScaleMove;
 	float fastScaleMousewheel;
 
+	float meshBlendMinDist;
+	float meshBlendMaxDist;
+
 	bool zoomBack;
 	bool cursorZoomIn;
 	bool cursorZoomOut;
@@ -64,7 +68,7 @@ private:
 	bool lockCardinalDirections;
 	int trackMapHeight;
 
-	mutable bool warnedSmoothMeshDisabled = false; // one-shot log guard for the smooth-mesh-disabled fallback
+	mutable bool warnedSmoothMeshDisabled = false; // one-shot log guard, see UseSmoothMesh()
 };
 
 #endif // _SPRING_CONTROLLER_H

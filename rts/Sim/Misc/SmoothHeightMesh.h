@@ -42,9 +42,12 @@ public:
 
 	float GetHeight(float x, float y);
 	float GetHeightAboveWater(float x, float y);
+	float GetHeightSmooth(float x, float y);
 	float SetHeight(int index, float h);
 	float AddHeight(int index, float h);
 	float SetMaxHeight(int index, float h);
+
+	bool HasMesh() const { return !mesh.empty(); }
 
 	int GetMaxX() const { return maxx; }
 	int GetMaxY() const { return maxy; }
