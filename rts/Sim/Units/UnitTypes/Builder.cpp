@@ -605,6 +605,14 @@ void CBuilder::SetRepairTarget(CUnit* target)
 void CBuilder::SetReclaimTarget(CSolidObject* target)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// A target already being destroyed (detached) cannot have a death dependence
+	// registered (AddDeathDependence no-ops on detached objects), which would leave
+	// curReclaim dangling. This happens when ~CObject's DependentDied cascade re-enters
+	// reclaim logic mid-deletion (e.g. CBuilderCAI::ExecuteGuard reading a guardee's
+	// stale curReclaim) on the very feature being freed. Refuse the dead target.
+	if (target == nullptr || target->detached)
+		return;
+
 	if (dynamic_cast<CFeature*>(target) != nullptr && !static_cast<CFeature*>(target)->def->reclaimable)
 		return;
 
@@ -630,6 +638,10 @@ void CBuilder::SetReclaimTarget(CSolidObject* target)
 void CBuilder::SetResurrectTarget(CFeature* target)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// see SetReclaimTarget: never depend on an object that is already being destroyed
+	if (target == nullptr || target->detached)
+		return;
+
 	if (curResurrect == target || target->udef == nullptr)
 		return;
 
@@ -646,6 +658,10 @@ void CBuilder::SetResurrectTarget(CFeature* target)
 void CBuilder::SetCaptureTarget(CUnit* target)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// see SetReclaimTarget: never depend on an object that is already being destroyed
+	if (target == nullptr || target->detached)
+		return;
+
 	if (target == curCapture)
 		return;
 
