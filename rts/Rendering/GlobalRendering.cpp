@@ -49,6 +49,7 @@
 	#include <algorithm>
 	#include <vector>
 	#include "System/Platform/Mac/MacEGLContext.h"
+	#include "System/Platform/Mac/MacGLPresent.h"
 	#include "System/Platform/Mac/MetalPresent.h"
 #endif
 
@@ -827,10 +828,14 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			}
 		#endif
 		
-		SDL_GL_SwapWindow(sdlWindow);
+		#ifdef SPRING_USE_MAC_EGL
+			MacGLPresent::SwapBuffers();
+		#else
+			SDL_GL_SwapWindow(sdlWindow);
+		#endif
 
 		#ifdef _WIN32
-			if (forceDWMFlush == 2){ 
+			if (forceDWMFlush == 2){
 				ZoneScopedN("CGlobalRendering::SwapBuffers::DWMFlushPost");
 				if (DwmFlush)
 					reinterpret_cast<DwmFlushT>(DwmFlush)();
