@@ -45,9 +45,6 @@
 	// Apple's OpenGL.framework cannot give the engine the context it needs,
 	// Mesa's EGL can, see MacEGLContext.h
 	#define SPRING_USE_MAC_EGL 1
-	// algorithm and vector are for the present test only, drop them with it
-	#include <algorithm>
-	#include <vector>
 	#include "System/Platform/Mac/MacEGLContext.h"
 	#include "System/Platform/Mac/MacGLPresent.h"
 	#include "System/Platform/Mac/MetalPresent.h"
@@ -565,47 +562,6 @@ static bool InitMacPresentLayer(SDL_Window* window, int2& drawableSize)
 
 	return true;
 }
-
-// Temporary, for bringing up the Metal present path before anything renders
-// through it. Delete once SwapBuffers presents for real.
-static void RunMacPresentTest(SDL_Window* window)
-{
-	if (getenv("SPRING_MAC_PRESENT_TEST") == nullptr)
-		return;
-
-	SDL_SysWMinfo wmInfo;
-	SDL_VERSION(&wmInfo.version);
-
-	if (!SDL_GetWindowWMInfo(window, &wmInfo)) {
-		LOG_L(L_ERROR, "[GR::%s] error \"%s\" getting the window info", __func__, SDL_GetError());
-		return;
-	}
-
-	if (!MacMetalPresent_Init(static_cast<void*>(wmInfo.info.cocoa.window)))
-		return;
-
-	int2 size;
-	SDL_GetWindowSize(window, &size.x, &size.y);
-
-	std::vector<uint32_t> frame(static_cast<size_t>(size.x) * size.y);
-
-	// BGRA in memory, so 0xAARRGGBB read as a little-endian word
-	for (const uint32_t color: {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu}) {
-		std::fill(frame.begin(), frame.end(), color);
-		MacMetalPresent_PresentBGRA(size.x, size.y, frame.data(), false);
-		SDL_PumpEvents();
-		SDL_Delay(300);
-	}
-
-	// top-down image, so the white band tells the reviewer which way up it went
-	std::fill(frame.begin(), frame.end(), 0xFF000000u);
-	std::fill(frame.begin(), frame.begin() + static_cast<size_t>(size.x) * (size.y / 2), 0xFFFFFFFFu);
-	MacMetalPresent_PresentBGRA(size.x, size.y, frame.data(), false);
-	SDL_PumpEvents();
-	SDL_Delay(1000);
-
-	LOG("[GR::%s] the window should have flashed red, green and blue, then shown white over black", __func__);
-}
 #endif
 
 bool CGlobalRendering::CreateWindowAndContext(const char* title)
@@ -713,11 +669,6 @@ bool CGlobalRendering::CreateWindowAndContext(const char* title)
 
 	MakeCurrentContext(false);
 	SDL_DisableScreenSaver();
-
-	#ifdef SPRING_USE_MAC_EGL
-	RunMacPresentTest(sdlWindow);
-	#endif
-
 	return true;
 }
 
