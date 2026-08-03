@@ -248,6 +248,45 @@ static CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 
 
 
+
+static inline void glVertexNarrow(float x, float y, float z, float w, int arity)
+{
+	switch (arity) {
+		case  2: glVertex2f(x, y);       break;
+		case  3: glVertex3f(x, y, z);    break;
+		default: glVertex4f(x, y, z, w); break;
+	}
+}
+
+// TEMP diagnostic, not for merge. off_probe finds the batching bug needs two
+// things fixed together, the full attribute set after every glBegin and a vertex
+// arity that never varies. This is the arity half. It has to be switchable or
+// SPRING_NO_BATCH_FLUSH stops being a baseline with no mitigation in it at all,
+// which already invalidated one negative control.
+static inline void LuaVertexN(float x, float y, float z, float w, int arity)
+{
+	// SPRING_BATCH_ARITY is the arity half on its own. off_probe says that is
+	// not enough, 15 of 17 against 0 of 17 for both halves, but it is much the
+	// cheaper half so it is worth confirming against the engine rather than
+	// assuming the probe models it.
+	static const bool normalise = (getenv("SPRING_BATCH_NORMALISE") != nullptr);
+	static const bool arityOnly = (getenv("SPRING_BATCH_ARITY") != nullptr);
+
+	// Gated on the measured capability, the same way the flush is, so a driver
+	// that renders batches correctly pays nothing. Widening every vertex to four
+	// floats is cheap but it is on the hot path for all Lua drawing, and no other
+	// platform should carry it for a defect it does not have.
+	if (globalRendering->supportImmediateModeBatching)
+		return glVertexNarrow(x, y, z, w, arity);
+
+	if (normalise || arityOnly) {
+		glVertex4f(x, y, z, w);
+		return;
+	}
+
+	glVertexNarrow(x, y, z, w, arity);
+}
+
 /******************************************************************************/
 /******************************************************************************/
 
@@ -2192,8 +2231,8 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				const float yb = heightmap[ziOff + xib];
 				const float yt = heightmap[ziOff + xit];
 				const float z = zi * SQUARE_SIZE;
-				glVertex4f(xt, yt, z, 1.0f);
-				glVertex4f(xb, yb, z, 1.0f);
+				LuaVertexN(xt, yt, z, 1.0f, 3);
+				LuaVertexN(xb, yb, z, 1.0f, 3);
 			}
 			glEnd();
 		}
@@ -2216,9 +2255,9 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				const float yt = heightmap[ziOff + xit];
 				const float z = zi * SQUARE_SIZE;
 				glTexCoord2f(tut, tv);
-				glVertex4f(xt, yt, z, 1.0f);
+				LuaVertexN(xt, yt, z, 1.0f, 3);
 				glTexCoord2f(tub, tv);
-				glVertex4f(xb, yb, z, 1.0f);
+				LuaVertexN(xb, yb, z, 1.0f, 3);
 				tv += tvStep;
 			}
 			glEnd();
@@ -2349,7 +2388,7 @@ int LuaOpenGL::Shape(lua_State* L)
 		if (vd.hasColor) { glColor4fv(vd.color);   }
 		if (vd.hasTxcd)  { glTexCoord2fv(vd.txcd); }
 		if (vd.hasNorm)  { glNormal3fv(vd.norm);   }
-		if (vd.hasVert)  { glVertex3fv(vd.vert);   } // always last
+		if (vd.hasVert)  { LuaVertexN(vd.vert[0], vd.vert[1], vd.vert[2], 1.0f, 3); } // always last
 	}
 	if (!lua_isnil(L, -1)) {
 		luaL_error(L, "Shape: bad vertex data, not a table");
@@ -2443,17 +2482,17 @@ int LuaOpenGL::Vertex(lua_State* L)
 		const float y = lua_tofloat(L, -1);
 		lua_rawgeti(L, 1, 3);
 		if (!lua_isnumber(L, -1)) {
-			glVertex4f(x, y, 0.0f, 1.0f);
+			LuaVertexN(x, y, 0.0f, 1.0f, 2);
 			return 0;
 		}
 		const float z = lua_tofloat(L, -1);
 		lua_rawgeti(L, 1, 4);
 		if (!lua_isnumber(L, -1)) {
-			glVertex4f(x, y, z, 1.0f);
+			LuaVertexN(x, y, z, 1.0f, 3);
 			return 0;
 		}
 		const float w = lua_tofloat(L, -1);
-		glVertex4f(x, y, z, w);
+		LuaVertexN(x, y, z, w, 4);
 		return 0;
 	}
 
@@ -2461,19 +2500,19 @@ int LuaOpenGL::Vertex(lua_State* L)
 		const float x = luaL_checkfloat(L, 1);
 		const float y = luaL_checkfloat(L, 2);
 		const float z = luaL_checkfloat(L, 3);
-		glVertex4f(x, y, z, 1.0f);
+		LuaVertexN(x, y, z, 1.0f, 3);
 	}
 	else if (args == 2) {
 		const float x = luaL_checkfloat(L, 1);
 		const float y = luaL_checkfloat(L, 2);
-		glVertex4f(x, y, 0.0f, 1.0f);
+		LuaVertexN(x, y, 0.0f, 1.0f, 2);
 	}
 	else if (args == 4) {
 		const float x = luaL_checkfloat(L, 1);
 		const float y = luaL_checkfloat(L, 2);
 		const float z = luaL_checkfloat(L, 3);
 		const float w = luaL_checkfloat(L, 4);
-		glVertex4f(x, y, z, w);
+		LuaVertexN(x, y, z, w, 4);
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.Vertex()");
@@ -2875,10 +2914,10 @@ int LuaOpenGL::TexRect(lua_State* L)
 			t2 = 1.0f;
 		}
 		glBeginBatch(GL_QUADS); {
-			glTexCoord2f(s1, t1); glVertex4f(x1, y1, 0.0f, 1.0f);
-			glTexCoord2f(s2, t1); glVertex4f(x2, y1, 0.0f, 1.0f);
-			glTexCoord2f(s2, t2); glVertex4f(x2, y2, 0.0f, 1.0f);
-			glTexCoord2f(s1, t2); glVertex4f(x1, y2, 0.0f, 1.0f);
+			glTexCoord2f(s1, t1); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
+			glTexCoord2f(s2, t1); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
+			glTexCoord2f(s2, t2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
+			glTexCoord2f(s1, t2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 		}
 		glEnd();
 		return 0;
@@ -2889,10 +2928,10 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const float s2 = luaL_checkfloat(L, 7);
 	const float t2 = luaL_checkfloat(L, 8);
 	glBeginBatch(GL_QUADS); {
-		glTexCoord2f(s1, t1); glVertex4f(x1, y1, 0.0f, 1.0f);
-		glTexCoord2f(s2, t1); glVertex4f(x2, y1, 0.0f, 1.0f);
-		glTexCoord2f(s2, t2); glVertex4f(x2, y2, 0.0f, 1.0f);
-		glTexCoord2f(s1, t2); glVertex4f(x1, y2, 0.0f, 1.0f);
+		glTexCoord2f(s1, t1); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
+		glTexCoord2f(s2, t1); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
+		glTexCoord2f(s2, t2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
+		glTexCoord2f(s1, t2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 	}
 	glEnd();
 

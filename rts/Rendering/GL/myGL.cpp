@@ -591,8 +591,9 @@ void glBeginBatch(GLenum mode)
 	// always emits glVertex4f. This is the other half, and it should also be far
 	// cheaper than a glFlush per batch, which serialises.
 	static const bool normalise = (getenv("SPRING_BATCH_NORMALISE") != nullptr);
+	static const bool arityOnly = (getenv("SPRING_BATCH_ARITY") != nullptr);
 
-	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush && !normalise)
+	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush && !normalise && !arityOnly)
 		glFlush();
 
 	// glGet is not legal between glBegin and glEnd, so read the current values
