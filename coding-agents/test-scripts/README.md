@@ -33,6 +33,41 @@ SplinterFaction is the only game with a LuaUI that has actually been run on this
 
 Metal Factions and MCL are installed. Whether Metal Factions runs at all is unverified, and XTA and Balanced Annihilation may not either. Confirming which of them start is worth doing on its own, before any of them is used as a control.
 
+## Measuring
+
+Four scripts, in the order you use them.
+
+```bash
+./install-probe.sh                      # freeze the scene, log the profiler
+SPRING_DIAG_CELLS=5:-/flush \
+  ./run-measured.sh 60 ~/dev/spring-testdata/logs/run.log
+python3 cells.py ~/dev/spring-testdata/logs/run.log
+./install-probe.sh --remove             # leave the game unmodified
+```
+
+`run-measured.sh` wraps `run-capped.sh`, so the memory ceiling and time limit still apply, and adds focus. It brings the window to the front and then reads frontmost back to confirm it, because `osascript ... set frontmost` succeeds against a process that has no window yet and the engine has none for the first several seconds of loading. It re-asserts focus on a lost poll and voids the run above one lost poll in twenty. It cannot check occlusion, so keep the window uncovered too.
+
+`widget_perf_probe.lua` freezes the scene at sim frame 90 and re-applies one camera state every frame, which also holds the camera against edge scroll and a knocked mouse. It runs `debug 1 0`, enabling the profiler with the on-screen overlay off, and echoes the top timers every five seconds. A frozen scene reads to about 2.5% between intervals where a live one varies by a factor of two.
+
+`SPRING_DIAG_CELLS=<seconds>:<cell>[/<cell>...]` cycles configurations inside one run, so both sides of a comparison see one scene and one focus state. A cell is `-` or a comma list of `flush`, `narrow`, `noflush`, `nopresent`, `finish`, `throttle`. An unknown name discards the whole schedule rather than measuring the baseline twice. Without it, each switch keeps its old meaning as a plain environment variable.
+
+`cells.py` groups by cycle, drops cycle 0 for the loading screen, and runs a paired sign test. Five cycles cannot beat p = 0.0625, so plan the run length for the number of cycles you need.
+
+**Only trust deltas between cells.** Absolute frame rates move about 10% between runs even frozen and focused. Mouse position is one uncontrolled variable, since hovering changes what the UI draws.
+
+## Standalone probes
+
+These need no engine run, so use them first where they can answer the question.
+
+| probe | what it settles |
+|---|---|
+| `timer_probe.c` | whether GL timer queries work. They do not: Zink on KosmicKrisp does not advertise `GL_ARB_timer_query`, and `glQueryCounter` silently returns zeros |
+| `fill_probe.c` | the driver's fill rate, and the cost of a render pass break. A break is a full attachment store and reload at memory bandwidth, 0.266ms at 3024x1832 |
+| `off_probe.c` | immediate-mode batching. Disagrees with the engine about the arity fix, so do not trust it for a new rule |
+| `kk_mipmap_leak.c` | the KosmicKrisp memory leak, attached to the upstream issue |
+
+Build and run them against the same Mesa the engine uses. Each carries its own command in a comment at the top. `DYLD_LIBRARY_PATH=/opt/homebrew/lib` is needed or Zink cannot find `libvulkan.1.dylib`.
+
 ## Capturing what happened
 
 `SPRING_PHASE_DUMP=1 SPRING_PHASE_DUMP_DIR=<dir>` writes a quarter-size PPM between draw phases, so a stray polygon can be attributed to the phase that drew it. Convert with `python3 ~/dev/macos-probes/ppm2png.py <file.ppm>`.

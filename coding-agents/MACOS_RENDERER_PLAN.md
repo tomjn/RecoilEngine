@@ -1052,6 +1052,70 @@ Reviewer check: the workflow goes green and fails if the engine stops drawing.
 
 Risk: medium. GitHub's `macos-26` arm64 runners are real hardware, and ExaDev's `zink-probe` ran there successfully on 2026-06-13 (run 27460811690, all steps green). But **the logs have expired and that workflow prints `GL_RENDERER` without asserting on it**, so a green run does not prove it got hardware rather than llvmpipe. Re-run the probe before designing anything around CI hardware rendering.
 
+---
+
+**The measurement harness, built 2026-08-03**
+
+Four things had to hold before any number was worth recording, and all four now do.
+
+**Focus is acquired and verified, not asked for.** `coding-agents/test-scripts/run-measured.sh <seconds> <logfile>` wraps `run-capped.sh`, so the memory ceiling still applies, and adds the window. The trap: `osascript ... set frontmost` returns success against a process that has no window yet, and the engine has no window for the first six or seven seconds of loading. Trusting the return code declares victory early and the run spends its whole length in the background, which is what happened on the first attempt, 0 of 45 polls with cmux frontmost. So it sets frontmost and then reads frontmost back, retrying for up to 90 seconds until the query confirms the engine's own pid. It re-asserts on a lost poll, and voids the run above one lost poll in twenty. **It cannot check occlusion**, because `NSWindow.occlusionState` is not readable from a shell, so keep the window uncovered as well as focused.
+
+**The scene is frozen, by a widget rather than an engine change.** `coding-agents/test-scripts/widget_perf_probe.lua`, installed into the throwaway game by `install-probe.sh` and removable with `install-probe.sh --remove`. At sim frame 90 it captures the camera state, pauses, and then re-applies that one state every frame, which also holds the camera against edge scroll and a knocked mouse. It also runs `debug 1 0`, which enables the profiler with its on-screen overlay off, and echoes the top timers by share of wall clock every five seconds.
+
+What that buys, measured: **a frozen scene reads 15.55, 15.79, 15.85, 15.96, 15.98, 15.97 and 15.80 fps across seven consecutive 10 second cycles.** The same binary on a live scene in the run before it swung 13.99, 18.02, 19.78, 27.97, 18.52, 15.45, 20.29, 24.49. So the harness turned a factor of two into 2.5%.
+
+**Switches are read per frame, so both sides fit in one run.** `rts/Rendering/GL/DiagSwitches.{h,cpp}`. `SPRING_DIAG_CELLS=<seconds>:<cell>[/<cell>...]` cycles a schedule, where a cell is `-` or a comma list of `flush`, `narrow`, `noflush`, `nopresent`, `finish`, `throttle`. It logs `[diag] cycle=N cell=X fps=Y frames=N over Ts` as each cell ends, and an unknown switch name discards the whole schedule rather than silently measuring the baseline twice. With no schedule set every switch keeps its old meaning as a plain environment variable. The mask is a plain global read inline, because `LuaVertexN` consults it per vertex. Phase dumps get `_cell-<name>` in the filename when a schedule is running, so frames can be scored per side.
+
+**Cells are compared paired.** `cells.py <logfile>` groups by cycle, drops cycle 0 for the loading screen, and runs a two-sided sign test on the paired cycles. It is honest about small samples: five cycles cannot produce a p below 0.0625 whatever the effect.
+
+**Three corrections this forces on the rest of this document.**
+
+- **The resolution is 3024x1832, not 1280x720.** The config is 1512x916 points and the display is 2x, so it is 5.54 Mpixel a frame. Every per-pixel figure written before this was out by a factor of six.
+- **Focus is worth less than the 20% claimed, and scene variation was the real cause of the old 14 to 19 range.** Frozen and focused reads 15.9, which sits inside that range rather than above it. The comparison that produced the 20% figure was confounded by the scene, not just by focus.
+- **Absolute frame rates still move about 10% between runs**, frozen and focused: one run's baseline was 15.9 and another's was 17.5, same resolution, same map, same freeze frame. **So only interleaved deltas are trustworthy, and absolute levels are not.** One uncontrolled variable is the mouse position, which the camera lock does not pin and which changes what the UI draws by hovering.
+
+**An engine bug found on the way.** `Spring.GetProfilerTimeRecord(name)` always errors with "bad argument #2 ... boolean expected, got number". `LuaUnsyncedRead::GetProfilerTimeRecord` pushes its five results before reading its optional second argument with `luaL_optboolean(L, 2, false)`, so by then stack index 2 holds the pushed total. Pass `false` explicitly to work around it. Reading the argument before pushing is a one line, platform-neutral fix and a candidate for a standalone upstream PR.
+
+---
+
+**What bounds the frame rate: render passes, not draw calls and not the present, measured 2026-08-03**
+
+**GPU timing is not available on this driver, so it had to be done indirectly.** `coding-agents/test-scripts/timer_probe.c` settles it without an engine run: Zink on KosmicKrisp does not advertise `GL_ARB_timer_query` or `GL_EXT_disjoint_timer_query`, so `GLAD_GL_ARB_timer_query` is false and `SetGLTimeStamp` does nothing. The engine's debug overlay GPU frame time reads zero here. Worse, `glQueryCounter` still resolves and returns `GL_NO_ERROR` with both timestamps zero, so anything that skips the extension check gets a confident 0.00ms. The probe also confirms an unissued query returns `GL_INVALID_OPERATION`, which means `CalcGLDeltaTime`'s `while (!res)` busy-wait would spin forever if it were ever reached before the first `CGame::Draw`. It is safe today only because the extension flag short-circuits it first.
+
+**The frame is GPU bound and the CPU is idle.** On the frozen scene, `Misc::SwapBuffers` is 88 to 95% of wall clock, about 59ms of a 63ms frame. Every CPU-side draw timer together is about 8%. The CPU is blocked in the present's `glReadPixels`, which waits for the GPU to finish the frame.
+
+**The cost is linear in pixel count.**
+
+| drawable | frozen fps | SwapBuffers | CPU `Draw` |
+|---|---|---|---|
+| 3024x1832, 5.54 Mpixel | 15.9 | 94% | 5.0ms |
+| 1512x916, 1.38 Mpixel | 65.0 | 88.9% | 1.19ms |
+
+4.0x the pixels for 4.09x the time. Both runs frozen and focused, and the quarter-resolution one is stable at 64.3 to 66.0 across thirteen intervals. Per draw call and per render pass overhead do not scale with pixels, so neither of those is the bound. Note that CPU-side `Draw` scaled too, 5.0ms against 1.19ms: that is back pressure, draw calls blocking when the driver's queue is full, not CPU work.
+
+**It is not the present path.** Interleaved, `-` against `nopresent,finish`, which keeps a per-frame sync but drops the readback and the present: the no-readback side was faster in 8 of 8 cycles by about 3%, roughly 2ms of a 67ms frame. That matches S3's 1.4ms to copy plus 0.5ms to present. That run was void on focus, but a delta measured between cells of one run is not exposed to focus, which is constant across them.
+
+**It is not raw fill either.** `coding-agents/test-scripts/fill_probe.c` measures the driver's own fill rate at the engine's resolution: 6.7 Gpixel/s for one opaque full-screen quad, 95 Gpixel/s for 64 blended ones, which is tile-local and never touches DRAM. The engine manages 0.09 Gpixel/s. The driver is between 300 and 1000 times faster than the engine achieves, so overdraw alone cannot explain it.
+
+**It is render pass breaks, and one costs a full attachment store and reload at memory bandwidth.** Same probe, same 64 blended full-screen quads, in one pass and then in 64:
+
+| | 3024x1832 | 1512x916 |
+|---|---|---|
+| 64 quads, one render pass | 3.72ms | 1.56ms |
+| 64 quads, one pass a quad | 20.48ms | 4.24ms |
+| implied cost of a pass break | 0.266ms | 0.043ms |
+
+A pass break scales with attachment size, so it is not a fixed overhead. 0.266ms for a 22MB store plus a 22MB reload is about 166 GB/s, which is this machine's memory bandwidth. The pass break is the store and the load.
+
+**That closes the model, and two independent numbers fit it.** The engine's 57ms divided by 0.266ms is roughly 200 render passes a frame, which explains the exact linear scaling in pixels. And the flush A/B agrees: interleaved on the frozen scene, baseline 17.51 against 16.19 with a `glFlush` before every immediate-mode batch, faster in 9 of 9 cycles, median delta 1.25 fps, sign test p = 0.0039. That 7.5% is 4.7ms, which is about 18 pass breaks, so this scene issues about 18 immediate-mode batches a frame. **This also settles the contradiction in this document about the flush: it is neither the 1.67x once claimed nor the nothing later measured, it is 7.5%.**
+
+**So the lever is the number of render passes, or making a pass not store and reload the whole attachment.** Two directions, and they are not exclusive:
+
+- Engine side: fewer framebuffer switches per frame. Nothing has counted them yet. A counter on `glBindFramebuffer` logged per cell is the cheap next step and it names the engine's own switches, which is what a fix would have to act on.
+- Driver side: a tiler should clear or discard rather than load and store when the previous contents are not needed. If Zink or KosmicKrisp is conservatively using load and store actions on every pass, that is a driver fix with a very large payoff, and it is the same shape of finding as the memory leak. Worth checking against Metal's `MTLLoadAction` and `MTLStoreAction` before reporting anything.
+
+**What is not worth retrying.** The present path, at 3%. Cheaper CPU-side drawing, since the CPU is already idle. Raw fill, since the driver is three orders of magnitude faster than the engine achieves. And the unsynced `nopresent` cell with no `glFinish`, which queues frames for the whole cell and makes the next synced cell absorb the entire backlog in one frame, contaminating exactly the baseline it is being compared against.
+
 ## 2b. Scope, set 2026-08-03
 
 **Not being pursued right now: S7 packaging and S5 geometry shaders.** No `.app` bundle, no code signing, no Gatekeeper work, and no catering specifically to BAR content. So distributable here means the engine builds, renders correctly, and the changes are in a state someone else can pick up, not a signed bundle a player double clicks.
@@ -1063,11 +1127,11 @@ What is left on the path, in order:
 1. **Settle PR #3169.** It is the only macOS work in front of upstream reviewers and it implements the flush, which uniform vertex arity has now superseded. The two have never been compared on the same Mesa, so test the arity fix on post-Metal4 before touching the PR.
 2. **Make the renderer stack reviewable.** S1 to S6 and borderless are local branches and nothing has landed. This is the real barrier to anyone else running the port.
 3. **The freeze.** It affects anyone who runs the engine whether or not it is packaged, and a memory ceiling cannot catch it.
-4. **A measurement harness that produces claims that survive.** See the note below.
+4. ~~**A measurement harness that produces claims that survive.**~~ **Done, see "The measurement harness" above.** Focus is acquired and verified, the scene is frozen, switches are read per frame so both sides fit in one run, and cells are compared paired. A frozen scene reads to 2.5%.
 
-**Measurements have to be scored, not eyeballed.** Almost every number produced on 2026-08-03 had to be retracted: the frame rates were measured on a backgrounded window where focus alone is worth about 20%, the negative control had half the fix compiled into it, and three probe results were mislabelled by patches that silently did not apply. The one result that held up was interleaved, same scene, immediate visual check, and it is still only six samples at about p = 0.016.
+**Measurements have to be scored, not eyeballed.** Almost every number produced before the harness had to be retracted: the frame rates were measured on a backgrounded window, the negative control had half the fix compiled into it, and three probe results were mislabelled by patches that silently did not apply. The one artefact result that held up was interleaved, same scene, immediate visual check, and it is still only six samples at about p = 0.016.
 
-The tooling for better already exists and was not used. `summarise.py` scores red, magenta and lavender pixels per frame, which is how the 11 of 89 against 0 of 31 figure was produced. Before any further measurement: foreground and unoccluded or the run is void, a fixed scene rather than a diverging sim, per-frame scoring rather than one impression, and both sides interleaved inside one session, which needs the switches read at runtime instead of into `static` locals.
+`summarise.py` scores red, magenta and lavender pixels per frame, which is how the 11 of 89 against 0 of 31 figure was produced. Phase dumps now carry the cell name, so an interleaved artefact A/B can be scored per side rather than pooled. That has not been run yet: the harness was spent on the frame rate question first.
 
 ## 3. What cannot go upstream
 
