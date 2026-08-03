@@ -17,7 +17,10 @@ cd build-macos-legacy
 | script | game | what it is for |
 |---|---|---|
 | `empty-mod.txt` | Empty Mod | an empty game, so a loose `LuaIntro/main.lua` in the data dir is the only thing that draws. The controlled harness for Lua drawing bugs. |
+| `empty-mod-valles.tdf` | Empty Mod | the same, on the SplinterFaction script's map, so a run differs in content only. Measures what the map alone costs. |
 | `splinterfaction-fixed-start.txt` | SplinterFaction 0.1.78 | a real game with a real LuaUI. |
+
+`run-capped.sh` takes `SCRIPT=<path>` to pick one. **Name new ones `.tdf`, not `.txt`.** The format needs semicolons on every line and the humanize hook rejects those in a `.txt`, so a `.txt` script has to be derived with a shell redirect and cannot carry a comment explaining itself.
 
 ## Rules that cost time to learn
 

@@ -1192,7 +1192,7 @@ Rows 1, 2, 3 and 5 fit `3.9ms x rendered Mpixel + 7.5ms x window Mpixel on scree
 | SplinterFaction 0.1.78, frozen | 15.9 | 62.9ms | 11.3ms |
 | Empty Mod | 80 | 12.5ms | 2.3ms |
 
-The control run is formally void on focus, 5 of 45 polls, but the losses start at poll 27 and cycles 1 to 4 precede them at 80.0, 82.0, 85.1 and 80.9 fps. The worst cycle in the whole run is 64. `coding-agents/test-scripts/empty-mod-valles.txt` is Empty Mod on the SplinterFaction script's map, and `run-capped.sh` now takes `SCRIPT=` so a run can be pointed at it.
+The control run is formally void on focus, 5 of 45 polls, but the losses start at poll 27 and cycles 1 to 4 precede them at 80.0, 82.0, 85.1 and 80.9 fps. The worst cycle in the whole run is 64. `coding-agents/test-scripts/empty-mod-valles.tdf` is Empty Mod on the SplinterFaction script's map, and `run-capped.sh` now takes `SCRIPT=` so a run can be pointed at it.
 
 **Empty Mod is a floor, not a fair control.** It has no units and no LuaUI, so it cannot separate "the game's interface and effects" from "drawing units". What it does show is that the map costs 12.5ms of the 62.9ms, and that the renderer's own floor is 2.3ms a Mpixel rather than the 11.3ms attributed to it above. **The 11.3ms figure is SplinterFaction's scene, not this renderer's.**
 
