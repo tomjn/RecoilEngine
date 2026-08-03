@@ -647,9 +647,24 @@ Verified on the resource bar: the four panel accents, all four icons and the res
 
 1.67x slower here against 4.7x measured at 5120x2754, so most of what looked catastrophic was the window size. Run the harness windowed and small.
 
-**There is no per-frame memory leak in evidence, and an earlier claim here that there was one was wrong.** Dividing peak RSS by frames drawn gave an apparent 2.3 MiB per frame in every configuration. That arithmetic is invalid, because the peak occurs during loading, before most of those frames exist. An actual RSS series over a 45 second run rises to 2621 MiB while loading, then falls and holds between 1400 and 1600 MiB with no upward trend. `run-capped.sh` writes the series next to the log, so use it rather than peaks.
+**There is a severe memory leak, around 5 GiB per second, and RSS cannot see it.**
 
-The plan's open question about IOAccelerator regions growing without bound is therefore still open, neither confirmed nor refuted.
+GPU and system memory are the same silicon on Apple Silicon, so IOAccelerator allocations are real pressure. `ps -o rss` does not count them. Measured on one run, `phys_footprint` against RSS at the same instants:
+
+| t | 0 | 2 | 4 | 6 | 8 | 10 | 12 | 14 | 16 |
+|---|---|---|---|---|---|---|---|---|---|
+| RSS | 0 | 487M | 745M | 1504M | 1578M | 1229M | 1394M | 1256M | 1349M |
+| footprint | 871M | 1804M | 5079M | 9605M | 12G | 20G | 31G | 42G | 50G |
+
+RSS is flat at about 1.3 GiB the whole time. This is why an earlier claim here that there was no leak was wrong: it was measured on RSS, which is blind to the growth, and on peak-divided-by-frames, which is invalid arithmetic because the peak lands during loading.
+
+**It is not caused by the deferred display lists.** Stock reaches 11 GiB at the same six second mark that the fix run reaches 9.6 GiB. The trajectories are the same, so this predates both the deferral and the flush.
+
+**It explains the KosmicKrisp abort.** `kk_CmdBeginRendering` failing to get a Metal command encoder is memory exhaustion, not a mysterious driver bug. It also explains the 54 GiB freeze, and why the RSS ceiling never fired while it happened.
+
+Use `phys_footprint` for anything memory related here. `run-capped.sh` caps on it at 20 GiB, which clears the roughly 10 GiB that loading alone needs while stopping far short of a freeze, and logs RSS, `top`'s MEM and footprint side by side. `top`'s MEM counts reserved address space and is not a pressure measure either.
+
+This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.
 
 The abort seen when memory is high is inside KosmicKrisp, `kk_CmdBeginRendering` to `cs_start_render` to `mtl_new_render_command_encoder_with_descriptor`. Metal cannot create a render command encoder and aborts the process, the same family as the compute-encoder abort recorded earlier.
 

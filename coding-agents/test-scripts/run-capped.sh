@@ -22,7 +22,11 @@ LAUNCHER=${LAUNCHER:-./run-macos.sh}
 # kill above this many kilobytes of resident memory
 # 16 GB of physical RAM on this machine, usually with a colima VM alongside, so
 # the headroom is much smaller than the total suggests
-MAX_RSS_KB=${MAX_RSS_KB:-3145728}   # 3 GiB of ps RSS
+# Loading alone reaches about 10 GiB of footprint, and the engine then grows at
+# roughly 5 GiB/s on this driver, so a low ceiling kills during load and a high
+# one lets the machine freeze. 20 GiB clears loading and stops well short of the
+# 54 GiB that took the system down.
+MAX_RSS_KB=${MAX_RSS_KB:-20971520}   # 20 GiB of phys_footprint
 POLL_SECONDS=2
 
 cd "$BUILD" || exit 1
@@ -43,14 +47,28 @@ while kill -0 "$PID" 2>/dev/null; do
 	# space, reporting 9.6 GiB six seconds into a load on a 16 GB machine. Which
 	# of these tracks real pressure is an open question, so record all three.
 	RSS_KB=$(ps -o rss= -p "$PID" 2>/dev/null | tr -d ' ')
-	if [ -n "$RSS_KB" ]; then
-		[ "$RSS_KB" -gt "$PEAK_KB" ] && PEAK_KB=$RSS_KB
+
+	# Cap on phys_footprint, not RSS. GPU and system memory are the same silicon
+	# on Apple Silicon, so IOAccelerator allocations are real pressure, and ps
+	# cannot see them: measured 50 GB of footprint while RSS read 1349 MB.
+	FOOT_KB=$(footprint -p "$PID" 2>/dev/null | awk '/phys_footprint:/ {
+		v = $2; u = $3
+		if (u ~ /^GB/) print v * 1048576
+		else if (u ~ /^MB/) print v * 1024
+		else if (u ~ /^KB/) print v
+		else print v / 1024
+		exit
+	}')
+	FOOT_KB=${FOOT_KB%.*}
+
+	if [ -n "$FOOT_KB" ] && [ "$FOOT_KB" -gt 0 ] 2>/dev/null; then
+		[ "$FOOT_KB" -gt "$PEAK_KB" ] && PEAK_KB=$FOOT_KB
 
 		TOPMEM=$(top -l 1 -pid "$PID" -stats mem 2>/dev/null | tail -1 | tr -d ' ')
 		FOOT=$(footprint -p "$PID" 2>/dev/null | awk '/phys_footprint:/ {print $2 $3; exit}')
 		echo "$ELAPSED rss=$((RSS_KB / 1024))M top=${TOPMEM:-?} foot=${FOOT:-?}" >> "$LOGFILE.mem"
-		if [ "$RSS_KB" -gt "$MAX_RSS_KB" ]; then
-			echo "MEMORY CEILING HIT at $((RSS_KB / 1024)) MiB after ${ELAPSED}s, killing"
+		if [ "$FOOT_KB" -gt "$MAX_RSS_KB" ]; then
+			echo "MEMORY CEILING HIT at $((FOOT_KB / 1024)) MiB footprint after ${ELAPSED}s, killing"
 			KILLED_FOR_MEMORY=1
 			kill -9 "$PID" 2>/dev/null
 			break
@@ -72,7 +90,7 @@ if pgrep -f '\./spring' > /dev/null; then
 	sleep 1
 fi
 
-echo "peak rss $((PEAK_KB / 1024)) MiB over ${ELAPSED}s"
+echo "peak footprint $((PEAK_KB / 1024)) MiB over ${ELAPSED}s"
 if [ "$KILLED_FOR_MEMORY" = 1 ]; then
 	echo "RESULT: killed for memory, do not trust anything this run produced"
 	exit 2
