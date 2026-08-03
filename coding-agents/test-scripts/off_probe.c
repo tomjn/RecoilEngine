@@ -58,6 +58,7 @@ static void (*p_glDisable)(GLenum);
 static void (*p_glFlush)(void);
 static void (*p_glFinish)(void);
 static void (*p_glVertex3f)(GLfloat, GLfloat, GLfloat);
+static void (*p_glVertex4f)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (*p_glGetFloatv)(GLenum, GLfloat*);
 static void (*p_glPushMatrix)(void);
 static void (*p_glPopMatrix)(void);
@@ -165,6 +166,10 @@ static void Quad(float x0, float y0, float x1, float y1,
 }
 
 // a batch that writes vertices but lights no pixels
+// E24 widens only the grid, so arity still varies between batches. The engine
+// widens every Lua vertex, so the analogue has to widen the warm-up as well.
+static int g_wideVerts = 0;
+
 static void DegenerateQuad(int txcd, int color, int norm, int lead, int verts)
 {
 	p_glColor3f(1.0f, 1.0f, 1.0f);
@@ -180,7 +185,8 @@ static void DegenerateQuad(int txcd, int color, int norm, int lead, int verts)
 		if (color) p_glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 		if (txcd)  p_glTexCoord2f(0.0f, 0.0f);
 		if (norm)  p_glNormal3f(0.0f, 0.0f, 1.0f);
-		p_glVertex2f(-1.0f, -1.0f);
+		if (g_wideVerts) p_glVertex4f(-1.0f, -1.0f, 0.0f, 1.0f);
+		else             p_glVertex2f(-1.0f, -1.0f);
 	}
 
 	p_glEnd();
@@ -237,7 +243,7 @@ int main(int argc, char** argv)
 	LOAD(glVertex2f); LOAD(glColor3f); LOAD(glColor4f);
 	LOAD(glTexCoord2f); LOAD(glNormal3f);
 	LOAD(glMatrixMode); LOAD(glLoadIdentity); LOAD(glDisable);
-	LOAD(glFlush); LOAD(glFinish); LOAD(glVertex3f); LOAD(glGetFloatv);
+	LOAD(glFlush); LOAD(glFinish); LOAD(glVertex3f); LOAD(glVertex4f); LOAD(glGetFloatv);
 	LOAD(glPushMatrix); LOAD(glPopMatrix); LOAD(glEnable);
 	LOAD(glGenLists); LOAD(glNewList); LOAD(glEndList); LOAD(glCallList);
 	LOAD(glRectf);
@@ -409,10 +415,15 @@ int main(int argc, char** argv)
 			"E18 E16 plus a glColor3f outside every batch",
 			"E19 naive plus a glColor3f outside every batch",
 			"E20 M3's exact calls, run inside this harness",
+			"E21 attribute set after every begin, churn left alone",
+			"E22 E21 plus a fixed vertex arity, colour and tex churn",
+			"E23 E21 plus colour and tex on every vertex, arity churns",
+			"E24 naive, but every vertex is a wide glVertex4f",
+			"E25 E24 but the warm-up batches are wide too",
 		};
 
 		const int fixLo = (argc > 2) ? atoi(argv[2]) : 0;
-		const int fixHi = (argc > 2) ? atoi(argv[2]) : 20;
+		const int fixHi = (argc > 2) ? atoi(argv[2]) : 25;
 		const int nLo = (argc > 3) ? atoi(argv[3]) : 0;
 		const int nHi = (argc > 3) ? atoi(argv[3]) : 16;
 
@@ -425,7 +436,8 @@ int main(int argc, char** argv)
 
 				// a run of plain batches, the way the load screen draws before
 				// it reaches the panel
-				const int leadWarmup = (fix == 16 || fix == 17 || fix == 20);
+				const int leadWarmup = (fix == 16 || fix == 17 || fix == 20 || fix == 21 || fix == 22 || fix == 23);
+				g_wideVerts = (fix == 25);
 				for (int i = 0; i < n; ++i)
 					DegenerateQuad(0, 0, 0, leadWarmup, 4);
 
@@ -492,7 +504,7 @@ int main(int argc, char** argv)
 						// vertex format. It does that with a fixed attribute set
 						// right after begin and a constant arity. E2 has the set
 						// but keeps the churn, so the pair has never been tried.
-						if (fix == 13 || fix == 14 || fix == 16 || fix == 18) {
+						if (fix == 13 || fix == 14 || fix == 16 || fix == 18 || fix == 21 || fix == 22 || fix == 23) {
 							p_glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 							p_glTexCoord2f(0.0f, 0.0f);
 							p_glNormal3f(0.0f, 0.0f, 1.0f);
@@ -500,15 +512,17 @@ int main(int argc, char** argv)
 
 						// the churn a widget produces: colour on some vertices,
 						// a texcoord on one, and a mixed vertex arity
-						const int arityChurn = (fix != 8 && fix != 12 && fix != 13 && fix != 14 && fix != 16 && fix != 18);
-						const int colorChurn = (fix != 9 && fix != 12 && fix != 13 && fix != 15 && fix != 16 && fix != 18);
-						const int texChurn = (fix != 10 && fix != 12 && fix != 13 && fix != 15 && fix != 16 && fix != 18);
+						const int arityChurn = (fix != 8 && fix != 12 && fix != 13 && fix != 14 && fix != 16 && fix != 18 && fix != 22);
+						const int colorChurn = (fix != 9 && fix != 12 && fix != 13 && fix != 15 && fix != 16 && fix != 18 && fix != 23);
+						const int texChurn = (fix != 10 && fix != 12 && fix != 13 && fix != 15 && fix != 16 && fix != 18 && fix != 23);
 
 						for (int v = 0; v < 4; ++v) {
 							if (!colorChurn || (v & 1)) p_glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 							if (!texChurn || v == 2) p_glTexCoord2f(0.0f, 0.0f);
 
-							if (fix == 4)
+							if (fix == 24 || fix == 25)
+								p_glVertex4f(xs[v], ys[v], 0.0f, 1.0f);
+							else if (fix == 4)
 								p_glVertex3f(xs[v], ys[v], 0.0f);
 							else if (arityChurn && v == 3)
 								p_glVertex3f(xs[v], ys[v], 0.0f);

@@ -870,6 +870,34 @@ Why this is worth having over the flush, if it holds up in the engine: it is com
 
 The probe now lives at `coding-agents/test-scripts/off_probe.c` rather than only in `~/dev/macos-probes`, so it cannot be lost. E20 runs M3's own calls inside the E harness as a control and agrees at 0 of 17.
 
+**Arity alone is not enough in the probe, whatever the engine seemed to show, 2026-08-03**
+
+The engine looked clean with `SPRING_BATCH_ARITY=1`, one run, watching the load screen. The probe disagrees flatly and has been asked three different ways:
+
+| fix | wrong |
+|---|---|
+| E8 uniform arity at 2f | 15 of 17 |
+| E24 the drawn batches widened to 4f, warm-up left narrow | 15 of 17 |
+| E25 every batch in the frame widened to 4f | 16 of 17 |
+| E16 and E22, the attribute set after begin plus uniform arity | **0 of 17** |
+
+So neither uniformity nor width fixes it on its own. Both halves are needed.
+
+Against that, one engine observation. The load screen is a good test point, since the naive baseline artefacts there within seconds, but one clean run at a roughly 6% residual is weak evidence. Repeat `SPRING_BATCH_ARITY=1` several times before believing it, and if it stays clean then the probe does not model the engine's Lua path and the probe is what needs fixing.
+
+**Switches for this, all gated on `supportImmediateModeBatching` so no other platform is affected:**
+
+| switch | behaviour |
+|---|---|
+| default | flush before every begin, narrow arity, what ships today |
+| `SPRING_BATCH_NORMALISE=1` | attribute set after begin plus uniform 4f arity, no flush |
+| `SPRING_BATCH_ARITY=1` | uniform 4f arity only, no flush |
+| `SPRING_NO_BATCH_FLUSH=1` | nothing at all, the true baseline |
+
+**The baseline reproduces reliably on the load screen.** `SPRING_NO_BATCH_FLUSH=1` shows the red artefact within seconds of the load screen appearing. That makes an A/B cheap, roughly 30 seconds a side, and it is a far better test point than building a factory.
+
+**Two traps from this round.** Do not run two engines at once, the second aborts with `std::system_error` at `UDPListener::TryBindSocket` and it looks like a code fault. And every `str.replace` patch to the probe needs asserting, since three separate results in this session were confidently mislabelled by substitutions that silently did not apply.
+
 **What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
 
 ---
