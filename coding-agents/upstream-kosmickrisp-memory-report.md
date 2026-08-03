@@ -52,7 +52,11 @@ VK_DRIVER_FILES=$MESA_PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.jso
 
 So about 26 MiB per `glGenerateMipmap` of a 1.33 MiB texture, and the texture is deleted immediately in every case. It scales linearly: 661 MiB at 25 textures, 992 at 50, 2339 at 100.
 
-It is not a leak in the sense of memory never freed. `glFinish` per iteration drains it completely. It is unbounded growth of work that has been queued and not yet retired, with nothing applying back-pressure. An application that queues faster than the GPU retires grows without limit, and on unified memory that is real system pressure that ends in the OOM killer.
+**The memory is never returned.** The `done` figure above is printed after a full `glFinish`, so every command buffer has retired, and it still reads 2625 MiB. `HOLD=1` re-reads it after five idle seconds and gets 2624 MiB.
+
+So the shape of the defect is: the IOGPU resource pool grows to the high-water mark of concurrently in-flight render passes and never shrinks. `SYNC=1` does not free anything, it holds the high-water mark down to one texture's worth by never letting more than one render pass be in flight. On unified memory that high-water mark is real system pressure, and it ends in the OOM killer.
+
+That distinction matters for anyone proposing a fix, because throttling submission does not work. Four separate throttles were tried against a real application and none bounded it, see below.
 
 Note for anyone measuring this: `ps -o rss` is useless here. IOAccelerator allocations are real memory on Apple Silicon and RSS does not count them. We measured 50 GB of `phys_footprint` against an RSS of 1349 MB.
 
@@ -68,6 +72,18 @@ Note for anyone measuring this: `ps -o rss` is useless here. IOAccelerator alloc
 
 Found while porting a real application, the Recoil RTS engine. A level load creates 102000 Metal command buffers in 12 seconds, split 68177 render passes to 33823 compute, and reaches 30 GiB of `phys_footprint` before the process is killed. An uncapped run reached 54 GB and made the machine unresponsive enough to need a power cycle. It also produces an abort inside `kk_CmdBeginRendering` when Metal can no longer create a render command encoder, which is memory exhaustion rather than a separate defect.
 
-## Not yet reconciled
+## Throttling does not fix it
 
-In the standalone reproducer a `glFinish` per iteration bounds the growth completely. In the engine, three different synchronisation points made no difference: a per-frame `glFinish`, a flush every 64 blits, and a flush plus timeline wait every 32 blits inside `zink_blit`. `ZINK_DEBUG=sync` also made no difference. Either the engine's peak is reached between two syncs, since a load uploads thousands of textures per drawn frame, or those particular waits did not drain what they were expected to. Worth stating in the report rather than claiming a clean throttling story.
+Four throttles were tried against the real application. All of them were verified to take effect, and none bounded the footprint.
+
+| throttle | effect on the mechanism | peak footprint |
+|---|---|---|
+| none, baseline | | 32 GiB at 12s |
+| `glFinish` after every texture built | 500 of 68177 render passes | 33 GiB at 12s |
+| flush every 64 blits inside `zink_blit` | 8000 of 68177 render passes | 31 GiB at 12s |
+| flush plus timeline wait every 32 blits | verified to fire, 247 times over 8000 blits | 30 GiB at 12s |
+| `ZINK_MAX_BATCHES=8`, down from 5000 | live batch states held at 7 to 18, from 126 to 229 | 22 GiB at 14s |
+
+The reason is the same in every case. A single batch state can contain thousands of render passes, so capping outstanding batches does not cap in-flight render passes, and syncing one class of render pass leaves the other 90%. There is no knob at the zink level that bounds what actually matters here, which is the number of render passes in flight at once.
+
+For reference, one level load of this application produces 102000 Metal command buffers in 12 seconds across 40000 submits, split 68177 render passes to 33823 compute, with never more than about 660 command buffers live at a time. Live object counts stay small throughout. It is the pool behind them that grows.

@@ -706,7 +706,9 @@ The failure of judgement that led to it is worth recording too. A 50 GB figure w
 
 Linear with count: 661 MiB at 25 textures, 992 at 50, 2339 at 100. The texture is deleted every iteration, so nothing the probe holds accounts for it.
 
-**It is not memory that is never freed.** A `glFinish` per iteration drains it completely, 161 MiB against 2626 MiB. What grows without bound is queued work that has not retired, with nothing applying back-pressure. Zink's only throttles are `check_oom_flush` on `bs->resource_size` and `batch_states_count > 5000` in `post_submit`, and both are blind to what a command buffer costs inside KosmicKrisp.
+**The memory is never returned, and `SYNC=1` does not free it.** The 2626 MiB figure is read after a full `glFinish`, so everything has retired, and `HOLD=1` reads 2624 MiB after five more idle seconds. What `SYNC=1` does is hold the high-water mark down to one texture's worth by never letting more than one render pass be in flight.
+
+So the mechanism is: **the IOGPU resource pool grows to the high-water mark of concurrently in-flight render passes and never shrinks.** Every result fits this and nothing contradicts it.
 
 `MESA_GL_VERSION_OVERRIDE=4.6` is needed or the core context fails to make current. `leak_probe.c` carries the same loop under `SPRING_PROBE_MIPMAP=1` with `SPRING_PROBE_NO_GENMIP=1` as its control, but `kk_mipmap_leak.c` is the one to hand upstream.
 
@@ -746,7 +748,20 @@ The flush and sync theories were both wrong for the same reason: the command buf
 
 **Mipmaps are a minority of the engine's growth anyway.** Splitting the KosmicKrisp counters by encoder type over a load gives 68177 render passes against 33823 compute, and only 8000 of those render passes are blits. So `glGenerateMipmap` is at most 8% of it and ordinary drawing and texture upload are the rest. There is no engine change that avoids render passes.
 
-**Unreconciled, and worth resolving before trusting any throttling story.** In the standalone probe a `glFinish` per iteration bounds the growth completely. In the engine, four separate synchronisation points changed nothing: a per-frame `glFinish`, `ZINK_BLIT_FLUSH=64`, `ZINK_BLIT_SYNC=32` for a flush plus timeline wait inside `zink_blit`, and `ZINK_DEBUG=sync`. Either the engine reaches its peak between two syncs, since a load uploads thousands of textures per drawn frame, or those particular waits did not drain what they were meant to. The `ZINK_BLIT_SYNC` stall was verified to fire, 247 times over 8000 blits, but not verified to actually drain.
+**Throttling does not work, settled 2026-08-03. Six tests, all negative, do not retry any of them.**
+
+| throttle | what it actually bounded | peak |
+|---|---|---|
+| baseline | | 32 GiB at 12s |
+| `SPRING_MIPMAP_SYNC=1`, `glFinish` per texture built | 500 of 68177 render passes | 33 GiB at 12s |
+| `ZINK_BLIT_FLUSH=64` | 8000 of 68177 render passes | 31 GiB at 12s |
+| `ZINK_BLIT_SYNC=32`, flush plus timeline wait | fired 247 times over 8000 blits | 30 GiB at 12s |
+| `ZINK_DEBUG=sync` | draws and dispatches | 37 GiB at 10s |
+| `ZINK_MAX_BATCHES=8`, down from zink's 5000 | live batch states 7 to 18, from 126 to 229 | 22 GiB at 14s |
+
+The reason is the same every time. One batch state holds thousands of render passes, so capping outstanding batches does not cap in-flight render passes, and syncing one class of render pass leaves the rest. There is no knob at the zink level that bounds the thing that matters.
+
+Numbers worth keeping. A load makes 102000 Metal command buffers in 12 seconds over 40000 submits, 68177 render passes against 33823 compute, with never more than about 660 command buffers live. Only 500 textures go through `RecoilBuildMipmaps`, which is why syncing that path cannot help. Zink's own throttle never engages at all, since live batch states peak at 126 to 229 against its threshold of 5000.
 
 The report draft is in `coding-agents/upstream-kosmickrisp-memory-report.md`, including where it should be filed and why.
 

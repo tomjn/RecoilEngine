@@ -1,11 +1,23 @@
-// Standalone reproducer: glGenerateMipmap leaks about 23 MiB per call on zink
-// over kosmickrisp. Written for an upstream Mesa report, so it deliberately
+// Standalone reproducer: on zink over kosmickrisp the process footprint grows
+// to the high-water mark of concurrently in-flight render passes and never
+// comes back down. Written for an upstream Mesa report, so it deliberately
 // depends on nothing but EGL and libGL.
 //
 // It creates a texture, allocates every mip level, generates the mips, and
-// deletes the texture again. It never draws anything and never presents. On
-// llvmpipe the footprint is flat. On zink over kosmickrisp it climbs by tens of
-// MiB per iteration and does not come back.
+// deletes the texture again. It never draws anything and never presents.
+// glGenerateMipmap is one blit, so one render pass, per mip level.
+//
+// 100 textures of 512x512, measured on an M1 Pro:
+//
+//   zink/kosmickrisp, no sync      2626 MiB
+//   zink/kosmickrisp, NO_GENMIP=1   224 MiB
+//   zink/kosmickrisp, SYNC=1        161 MiB
+//   llvmpipe, no sync                36 MiB
+//
+// SYNC=1 does a glFinish per iteration, which holds the high-water mark at one
+// texture's worth. Without it, all 100 are in flight at once and the footprint
+// stays at 2.6 GiB even after a full glFinish and five idle seconds, so this is
+// not work merely queued. HOLD=1 demonstrates that.
 //
 // build:
 //   cc -O2 -o kk_mipmap_leak kk_mipmap_leak.c \
@@ -27,6 +39,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef unsigned int GLenum;
 typedef unsigned int GLuint;
@@ -155,5 +168,13 @@ int main(int argc, char** argv)
 	p_glFinish();
 	free(pixels);
 	printf("done, footprint %lu MiB after %d textures\n", footprint_mib(), count);
+
+	// The number above is taken after a full glFinish, so everything has
+	// retired. If it is still high, the memory is not merely in flight. HOLD=1
+	// re-reads it after a pause to rule out lazy accounting.
+	if (getenv("HOLD") != NULL) {
+		sleep(5);
+		printf("after 5s idle, footprint %lu MiB\n", footprint_mib());
+	}
 	return 0;
 }
