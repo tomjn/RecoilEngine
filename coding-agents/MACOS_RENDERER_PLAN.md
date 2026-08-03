@@ -1052,6 +1052,23 @@ Reviewer check: the workflow goes green and fails if the engine stops drawing.
 
 Risk: medium. GitHub's `macos-26` arm64 runners are real hardware, and ExaDev's `zink-probe` ran there successfully on 2026-06-13 (run 27460811690, all steps green). But **the logs have expired and that workflow prints `GL_RENDERER` without asserting on it**, so a green run does not prove it got hardware rather than llvmpipe. Re-run the probe before designing anything around CI hardware rendering.
 
+## 2b. Scope, set 2026-08-03
+
+**Not being pursued right now: S7 packaging and S5 geometry shaders.** No `.app` bundle, no code signing, no Gatekeeper work, and no catering specifically to BAR content. So distributable here means the engine builds, renders correctly, and the changes are in a state someone else can pick up, not a signed bundle a player double clicks.
+
+That reduces the Mesa problem considerably. Without bundling there is nothing to license or ship, just a documented build recipe and the upstream issue.
+
+What is left on the path, in order:
+
+1. **Settle PR #3169.** It is the only macOS work in front of upstream reviewers and it implements the flush, which uniform vertex arity has now superseded. The two have never been compared on the same Mesa, so test the arity fix on post-Metal4 before touching the PR.
+2. **Make the renderer stack reviewable.** S1 to S6 and borderless are local branches and nothing has landed. This is the real barrier to anyone else running the port.
+3. **The freeze.** It affects anyone who runs the engine whether or not it is packaged, and a memory ceiling cannot catch it.
+4. **A measurement harness that produces claims that survive.** See the note below.
+
+**Measurements have to be scored, not eyeballed.** Almost every number produced on 2026-08-03 had to be retracted: the frame rates were measured on a backgrounded window where focus alone is worth about 20%, the negative control had half the fix compiled into it, and three probe results were mislabelled by patches that silently did not apply. The one result that held up was interleaved, same scene, immediate visual check, and it is still only six samples at about p = 0.016.
+
+The tooling for better already exists and was not used. `summarise.py` scores red, magenta and lavender pixels per frame, which is how the 11 of 89 against 0 of 31 figure was produced. Before any further measurement: foreground and unoccluded or the run is void, a fixed scene rather than a diverging sim, per-frame scoring rather than one impression, and both sides interleaved inside one session, which needs the switches read at runtime instead of into `static` locals.
+
 ## 3. What cannot go upstream
 
 **S5, the geometry-shader guard.** Three reasons, and they compound.
