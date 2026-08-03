@@ -666,6 +666,25 @@ Use `phys_footprint` for anything memory related here. `run-capped.sh` caps on i
 
 This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.
 
+**Ruled out, each by measurement. Do not retry these.**
+
+| theory | test | result |
+|---|---|---|
+| the deferred display lists | stock vs fix | identical, 11 GiB vs 9.6 GiB at t=6s |
+| the present readback | `SPRING_NO_PRESENT` | growth got *faster* |
+| missing synchronisation | `SPRING_FRAME_FINISH` | unchanged, 21.5 GiB at t=10s |
+| proportional to frames | `SPRING_FRAME_THROTTLE` at 60fps | unchanged, 21.5 GiB at t=10s |
+| general immediate-mode drawing | standalone `leak_probe` | flat, 41 to 52 MiB over 18M batches |
+| sound and OpenAL | `Sound = 0` | unchanged, 32 GiB at t=10s |
+
+It is also absent in the main menu, flat over 21 seconds, and absent on llvmpipe, flat over 80 seconds with the same binary and content. So it needs a game loaded and it is driver side.
+
+**One genuine defect the probe did find, separate from the engine's problem.** With no per-frame synchronisation at all, `leak_probe` grows without bound, 466 MiB to 5.3 GiB over 1.5 million frames. Adding one `glFinish` per frame makes it flat. That is a clean standalone reproducer for the upstream report, but its magnitude does not explain the engine, and adding a `glFinish` to the engine does not help.
+
+**Where it points.** It scales with a game being loaded but not with frames drawn, which leaves resource creation at scale: the thousands of texture, buffer and mipmap allocations a map and unit set need. `RecoilBuildMipmaps` allocates every mip level for every texture and then calls `glGenerateMipmap`, which is the shape worth reproducing next. Extend `leak_probe` with texture creation rather than touching the engine.
+
+**Worth keeping anyway:** throttling the present to 60fps raised the in-game frame rate from single digits to about 18, so the memory pressure appears to be what was slowing the engine rather than the reverse.
+
 The abort seen when memory is high is inside KosmicKrisp, `kk_CmdBeginRendering` to `cs_start_render` to `mtl_new_render_command_encoder_with_descriptor`. Metal cannot create a render command encoder and aborts the process, the same family as the compute-encoder abort recorded earlier.
 
 **This froze a machine, so read this before running anything.** An uncapped run reached 54 GB on a 16 GB machine, made the system unresponsive to the point that the out-of-memory dialog would not respond, and cost a hard power cycle. 54 GB was the ceiling it hit, not what it wanted. The likeliest cause is the deferred display list runaway described above, before the 8192 cap existed, since that is genuinely unbounded rather than a slow leak. It has not recurred since the cap. macOS has no cgroup and `ulimit -v` does not constrain Metal allocations, so **always launch through `coding-agents/test-scripts/run-capped.sh`**, which polls RSS and SIGKILLs at 3 GiB by default. A `gl.CreateList` count above 8192 is now refused by the engine for the same reason.
