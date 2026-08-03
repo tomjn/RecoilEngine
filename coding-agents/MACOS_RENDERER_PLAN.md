@@ -918,7 +918,17 @@ The difference is obvious rather than marginal, so this is not a 6% residual bei
 
 Three of those four ran unattended with no input at all, on whatever the opening camera shows. The fourth was noticed and played, a building was placed, and that is the 19.2. So the comparable set is 16.2, 16.0 and 16.4, which is no difference whatsoever. Removing the flush does not change the frame rate.
 
-Two things follow. The interactive run being the *fastest* is backwards for added work, so what is on screen matters more than what the player does, which is worth knowing before optimising. And every unattended fps figure in this document describes an idle opening camera rather than a played game, so none of them should be read as the frame rate of actual play. The 1.67x the flush was once measured at does not show up here. Whatever bounds the frame rate at 16 to 19 fps is not the flush, so that is where the next performance work belongs rather than in this mitigation.
+**The likeliest cause is focus, not interaction.** macOS gives the foreground app a higher scheduling priority and marks fully covered windows as occluded. Every unattended run sat behind an editor, unfocused and probably occluded. The 19.2 is the run that had been clicked into. So the outlier is most plausibly explained by window focus rather than by anything about the frame or the mitigation.
+
+That makes every frame rate figure in this document suspect, not just this comparison. All of them were measured on a background window, so they are lower bounds under background scheduling, and the 14 to 19 range recorded earlier as steady state is not the frame rate of a focused, played game.
+
+**Any future performance work has to control for this.** Bring the window to the front before measuring and keep it unoccluded, for example with
+
+```
+osascript -e 'tell application "System Events" to set frontmost of first process whose unix id is <pid> to true'
+```
+
+and treat any run where the window was covered as void. Without that, focus changes alone can move the result by 20%, which is larger than most of the differences worth measuring. The 1.67x the flush was once measured at does not show up here. Whatever bounds the frame rate at 16 to 19 fps is not the flush, so that is where the next performance work belongs rather than in this mitigation.
 
 **off_probe now disagrees with the engine and the engine wins.** The probe puts uniform arity at 15 of 17 wrong however it is asked, and it is flatly wrong about this path. Either the probe's synthetic grid does not capture what LuaOpenGL does, or the load screen's corruption has a different cause than the grid's. Worth resolving before the probe is trusted for the next rule, since it has been the cheap way to test candidates without engine runs.
 
