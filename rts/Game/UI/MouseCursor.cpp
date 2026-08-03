@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
@@ -336,6 +337,21 @@ void CMouseCursor::Draw(int x, int y, float scale) const
 	cursorMat.Translate(matParams.x, matParams.y, 0.0f);
 	cursorMat.Scale({ matParams.z, matParams.w, 1.0f });
 
+	// TEMP diagnostic, not for merge. The cursor is invisible on the macOS
+	// renderer and every candidate cause is visible from here.
+	{
+		static int drawCounter = 0;
+		if ((drawCounter++ % 600) == 0) {
+			LOG("[CMouseCursor::Draw] name=%s frames=%u frame=%d tex=%u aligned=%dx%d orig=%dx%d "
+				"xy=<%d,%d> view=<%d,%d> scale=%f matParams=<%f,%f,%f,%f> shaderValid=%d clipCtrl=%d",
+				name.c_str(), uint32_t(frames.size()), currentFrame, image.texture,
+				image.xAlignedSize, image.yAlignedSize, image.xOrigSize, image.yOrigSize,
+				x, y, globalRendering->viewSizeX, globalRendering->viewSizeY, scale,
+				matParams.x, matParams.y, matParams.z, matParams.w,
+				int(sh.IsValid()), int(globalRendering->supportClipSpaceControl));
+		}
+	}
+
 	rb.AddQuadTriangles(CURSOR_VERTS);
 
 	glMatrixMode(GL_MODELVIEW);
@@ -355,7 +371,34 @@ void CMouseCursor::Draw(int x, int y, float scale) const
 	sh.Enable();
 	sh.SetUniform("alphaCtrl", 0.01f, 1.0f, 0.0f, 0.0f); // test > 0.01
 
+	// TEMP diagnostic, not for merge. Reads the framebuffer either side of the
+	// submit, so "the cursor is invisible" can be split into "it never reaches
+	// the framebuffer" and "it reaches it and something later loses it".
+	static int probeCounter = 0;
+	const bool probeThisFrame = ((probeCounter++ % 600) == 0);
+
+	constexpr int probeBox = 48;
+	std::array<uint8_t, probeBox * probeBox * 4> before;
+	std::array<uint8_t, probeBox * probeBox * 4> after;
+
+	const int probeX = std::clamp(x - probeBox / 2, 0, globalRendering->viewSizeX - probeBox);
+	const int probeY = std::clamp((globalRendering->viewSizeY - y) - probeBox / 2, 0, globalRendering->viewSizeY - probeBox);
+
+	if (probeThisFrame)
+		glReadPixels(probeX, probeY, probeBox, probeBox, GL_RGBA, GL_UNSIGNED_BYTE, before.data());
+
 	rb.Submit(GL_TRIANGLES);
+
+	if (probeThisFrame) {
+		glReadPixels(probeX, probeY, probeBox, probeBox, GL_RGBA, GL_UNSIGNED_BYTE, after.data());
+
+		size_t changed = 0;
+		for (size_t i = 0; i < before.size(); i += 4)
+			changed += (before[i] != after[i] || before[i + 1] != after[i + 1] || before[i + 2] != after[i + 2]);
+
+		LOG("[CMouseCursor::Draw] submit changed %u of %d pixels in a %dx%d box at <%d,%d>, glError=0x%04x",
+			uint32_t(changed), probeBox * probeBox, probeBox, probeBox, probeX, probeY, glGetError());
+	}
 
 	sh.SetUniform("alphaCtrl", 0.0f, 0.0f, 0.0f, 1.0f); // no test
 	sh.Disable();
