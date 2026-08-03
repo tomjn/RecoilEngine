@@ -9,14 +9,14 @@
 //
 // 100 textures of 512x512, measured on an M1 Pro:
 //
-//   zink/kosmickrisp, no sync      2626 MiB
-//   zink/kosmickrisp, NO_GENMIP=1   224 MiB
-//   zink/kosmickrisp, SYNC=1        161 MiB
-//   llvmpipe, no sync                36 MiB
+//   zink/kosmickrisp, no sync      2626mb
+//   zink/kosmickrisp, NO_GENMIP=1   224mb
+//   zink/kosmickrisp, SYNC=1        161mb
+//   llvmpipe, no sync                36mb
 //
 // SYNC=1 does a glFinish per iteration, which holds the high-water mark at one
 // texture's worth. Without it, all 100 are in flight at once and the footprint
-// stays at 2.6 GiB even after a full glFinish and five idle seconds, so this is
+// stays at 2.6gb even after a full glFinish and five idle seconds, so this is
 // not work merely queued. HOLD=1 demonstrates that.
 //
 // build:
@@ -31,8 +31,14 @@
 //   VK_DRIVER_FILES=$MESA_PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json \
 //   ./kk_mipmap_leak 100
 //
-// It stops itself at 6 GiB. Do not remove that: at this rate an unattended run
-// will take a 16 GB machine down hard enough to need a power cycle.
+// Start at 100. That is enough to show the problem, and a bigger count is not
+// safe to leave running.
+//
+// There is a self-imposed ceiling below, but do not rely on it without SYNC=1.
+// The in-loop reading lags while the work is still queued: it shows 236mb at
+// texture 90 and then 2626mb moments later at the closing glFinish. So the
+// ceiling can be sailed straight past without ever tripping. An unattended run
+// took a 16gb machine to 54gb and cost a power cycle.
 
 #include <EGL/egl.h>
 #include <mach/mach.h>
@@ -72,8 +78,8 @@ static const GLubyte* (*p_glGetString)(GLenum);
 	if (!p_##n) { fprintf(stderr, "missing %s\n", #n); return 1; }
 
 // phys_footprint is the only number that means anything here. RSS does not
-// count IOAccelerator allocations at all: measured 50 GB of footprint against
-// an RSS of 1349 MB.
+// count IOAccelerator allocations at all: measured 50gb of footprint against
+// an RSS of 1349mb.
 static unsigned long footprint_mib(void)
 {
 	task_vm_info_data_t info;
@@ -119,7 +125,7 @@ int main(int argc, char** argv)
 	LOAD(glFinish); LOAD(glGetString);
 
 	printf("GL_RENDERER = %s\n", p_glGetString(GL_RENDERER));
-	printf("%d textures of %dx%d, glGenerateMipmap %s, footprint at start %lu MiB\n",
+	printf("%d textures of %dx%d, glGenerateMipmap %s, footprint at start %lumb\n",
 	       count, TEXSIZE, TEXSIZE, genmip ? "on" : "off", footprint_mib());
 	fflush(stdout);
 
@@ -148,7 +154,7 @@ int main(int argc, char** argv)
 		p_glDeleteTextures(1, &tex);
 
 		// Without this the work is still queued and the footprint lags badly:
-		// it reads 236 MiB at texture 90 and then jumps to 2626 MiB at the
+		// it reads 236mb at texture 90 and then jumps to 2626mb at the
 		// final glFinish. SYNC=1 makes each iteration's cost land where it is
 		// incurred, which is also what makes the ceiling below effective.
 		if (sync)
@@ -156,10 +162,10 @@ int main(int argc, char** argv)
 
 		if ((t % 10) == 0) {
 			const unsigned long mib = footprint_mib();
-			printf("texture %4d, footprint %lu MiB\n", t, mib);
+			printf("texture %4d, footprint %lumb\n", t, mib);
 			fflush(stdout);
 			if (mib > CEILING_MIB) {
-				printf("stopping at the %d MiB ceiling\n", CEILING_MIB);
+				printf("stopping at the %dmb ceiling\n", CEILING_MIB);
 				return 2;
 			}
 		}
@@ -167,14 +173,14 @@ int main(int argc, char** argv)
 
 	p_glFinish();
 	free(pixels);
-	printf("done, footprint %lu MiB after %d textures\n", footprint_mib(), count);
+	printf("done, footprint %lumb after %d textures\n", footprint_mib(), count);
 
 	// The number above is taken after a full glFinish, so everything has
 	// retired. If it is still high, the memory is not merely in flight. HOLD=1
 	// re-reads it after a pause to rule out lazy accounting.
 	if (getenv("HOLD") != NULL) {
 		sleep(5);
-		printf("after 5s idle, footprint %lu MiB\n", footprint_mib());
+		printf("after 5s idle, footprint %lumb\n", footprint_mib());
 	}
 	return 0;
 }
