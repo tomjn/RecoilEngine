@@ -848,6 +848,28 @@ Two consequences worth holding on to:
 
 The probe still does not reproduce the engine's display list case. Rows D0 to D2 are 0 of 17 wrong, so a list replayed among many live immediate-mode batches, which is the case that matters in the engine, is still unmodelled.
 
+**A complete fix exists and it is not a flush, measured 2026-08-03**
+
+Normalising the vertex format of **every** immediate-mode batch in the frame gives 0 of 17 wrong. Identical on both Mesa versions, so this is a property of the bug and not of one build.
+
+| fix | pre-Metal4 | post-Metal4 |
+|---|---|---|
+| E0 naive, how the engine drew before | 15 of 17 | 15 of 17 |
+| E6 glFlush before every begin, what it ships now | 1 of 17 | 1 of 17 |
+| E12 grid normalised, warm-up left alone | 15 of 17 | 15 of 17 |
+| E17 warm-up normalised, grid left alone | 16 of 17 | 16 of 17 |
+| **E16 both normalised** | **0 of 17** | **0 of 17** |
+
+Normalising a batch means emitting the full attribute set once immediately after `glBegin`, a colour, a texcoord and a normal, and never varying the vertex arity inside the batch.
+
+**Partial coverage does not work, and that is the hard part.** E12 normalises the batches being looked at and fails. E17 normalises only the batches drawn before them and fails. Only doing both is clean. So this cannot be applied to one widget or one code path. Every immediate-mode batch in the frame has to be normalised or none of it counts, which is a real constraint on how it can be implemented. `glBeginBatch` in `myGL.cpp` is already the chokepoint every batch passes through, so it is the obvious place to try.
+
+Why this is worth having over the flush, if it holds up in the engine: it is complete rather than 94% effective, and three attribute calls per batch should cost far less than a `glFlush` per batch, which serialises. The measured 1.67x at 1280x720 is the flush's price.
+
+**A methodology warning, because it nearly produced three wrong conclusions.** These fixes were added to `off_probe` with `str.replace`, which silently does nothing when the pattern does not match. Two patches failed that way and the runs still printed confident, wrongly labelled results. E16 read 15 of 17 while not actually doing what its label said, and reads 0 of 17 once it does. Verify a patch landed before believing the numbers, and check every substitution rather than the last one.
+
+The probe now lives at `coding-agents/test-scripts/off_probe.c` rather than only in `~/dev/macos-probes`, so it cannot be lost. E20 runs M3's own calls inside the E harness as a control and agrees at 0 of 17.
+
 **What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
 
 ---
