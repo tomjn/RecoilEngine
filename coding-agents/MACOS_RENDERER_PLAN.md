@@ -898,6 +898,28 @@ Against that, one engine observation. The load screen is a good test point, sinc
 
 **Two traps from this round.** Do not run two engines at once, the second aborts with `std::system_error` at `UDPListener::TryBindSocket` and it looks like a code fault. And every `str.replace` patch to the probe needs asserting, since three separate results in this session were confidently mislabelled by substitutions that silently did not apply.
 
+**Uniform vertex arity replaces the flush, and it is a correctness win rather than a speed one, 2026-08-03**
+
+Three interleaved pairs on the load screen, which the baseline corrupts within seconds of appearing:
+
+| side | result |
+|---|---|
+| `SPRING_NO_BATCH_FLUSH=1`, nothing | artefacts, 3 of 3 |
+| uniform 4f arity in LuaOpenGL, no flush | clean, 3 of 3 |
+
+The difference is obvious rather than marginal, so this is not a 6% residual being read as a fix. The mitigation is now uniform arity, the flush is opt-in behind `SPRING_BATCH_FLUSH=1`, and `SPRING_BATCH_NARROW=1` restores the old vertices. Both are gated on `supportImmediateModeBatching`, so nothing changes on a driver without the defect.
+
+**The speed win did not materialise.** Four runs alternating, 10 second fps windows:
+
+| | run 1 | run 2 |
+|---|---|---|
+| flush | 16.2 | 16.0 |
+| arity | 16.4 | 19.2 |
+
+The spread between the two arity runs is wider than the gap between the two conditions, so the honest reading is no reliable difference, perhaps a slight gain. The 1.67x the flush was once measured at does not show up here. Whatever bounds the frame rate at 16 to 19 fps is not the flush, so that is where the next performance work belongs rather than in this mitigation.
+
+**off_probe now disagrees with the engine and the engine wins.** The probe puts uniform arity at 15 of 17 wrong however it is asked, and it is flatly wrong about this path. Either the probe's synthetic grid does not capture what LuaOpenGL does, or the load screen's corruption has a different cause than the grid's. Worth resolving before the probe is trusted for the next rule, since it has been the cheap way to test candidates without engine runs.
+
 **What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
 
 ---
