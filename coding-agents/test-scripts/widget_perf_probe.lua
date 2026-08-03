@@ -87,6 +87,30 @@ function widget:Update()
 	end
 end
 
+-- Spring.GetProfilerTimeRecord had two bugs: it read its optional second
+-- argument after pushing its results, so index 2 held the pushed total and any
+-- one-argument call errored, and the frameData branch rawset into a number
+-- because no table was ever created. Both call forms are exercised here so a fix
+-- is checked rather than assumed.
+local checkedApi = false
+
+local function checkApi(name)
+	checkedApi = true
+
+	local ok1, a = pcall(Spring.GetProfilerTimeRecord, name)
+	Spring.Echo(string.format("[probe] api one arg: ok=%s first=%s", tostring(ok1), tostring(a)))
+
+	local ok2, b = pcall(Spring.GetProfilerTimeRecord, name, false)
+	Spring.Echo(string.format("[probe] api false: ok=%s first=%s", tostring(ok2), tostring(b)))
+
+	local ok3, r1, r2, r3, r4, r5, frames = pcall(Spring.GetProfilerTimeRecord, name, true)
+	local n = 0
+	if ok3 and type(frames) == "table" then
+		for _ in pairs(frames) do n = n + 1 end
+	end
+	Spring.Echo(string.format("[probe] api true: ok=%s type=%s entries=%d", tostring(ok3), type(frames), n))
+end
+
 reportProfile = function()
 	local rows = {}
 	for _, name in ipairs(Spring.GetProfilerRecordNames()) do
@@ -98,6 +122,10 @@ reportProfile = function()
 		rows[#rows + 1] = { name = name, pct = pct or 0, current = current or 0, maxdt = maxdt or 0 }
 	end
 	table.sort(rows, function(a, b) return a.pct > b.pct end)
+
+	if not checkedApi and rows[1] ~= nil then
+		checkApi(rows[1].name)
+	end
 
 	for i = 1, math.min(TOP_N, #rows) do
 		local r = rows[i]

@@ -1074,7 +1074,7 @@ What that buys, measured: **a frozen scene reads 15.55, 15.79, 15.85, 15.96, 15.
 - **Focus is worth less than the 20% claimed, and scene variation was the real cause of the old 14 to 19 range.** Frozen and focused reads 15.9, which sits inside that range rather than above it. The comparison that produced the 20% figure was confounded by the scene, not just by focus.
 - **Absolute frame rates still move about 10% between runs**, frozen and focused: one run's baseline was 15.9 and another's was 17.5, same resolution, same map, same freeze frame. **So only interleaved deltas are trustworthy, and absolute levels are not.** One uncontrolled variable is the mouse position, which the camera lock does not pin and which changes what the UI draws by hovering.
 
-**An engine bug found on the way.** `Spring.GetProfilerTimeRecord(name)` always errors with "bad argument #2 ... boolean expected, got number". `LuaUnsyncedRead::GetProfilerTimeRecord` pushes its five results before reading its optional second argument with `luaL_optboolean(L, 2, false)`, so by then stack index 2 holds the pushed total. Pass `false` explicitly to work around it. Reading the argument before pushing is a one line, platform-neutral fix and a candidate for a standalone upstream PR.
+**Two engine bugs found on the way, both fixed.** `Spring.GetProfilerTimeRecord` pushed its five results before reading its optional second argument with `luaL_optboolean(L, 2, false)`, so index 2 held the pushed total and **any one-argument call errored** with "bad argument #2 ... boolean expected, got number". And the `frameData` branch called `lua_rawset(L, -3)` without ever creating a table, so index -3 was the pushed `peak_pct`: **the documented sixth return value had never worked either.** Reading the argument first and creating the table fixes both. Verified in a real run: one argument, `false` and `true` all succeed, and `true` returns a table of 128 entries. Platform-neutral and a candidate for a standalone upstream PR.
 
 ---
 
@@ -1108,6 +1108,27 @@ What that buys, measured: **a frozen scene reads 15.55, 15.79, 15.85, 15.96, 15.
 A pass break scales with attachment size, so it is not a fixed overhead. 0.266ms for a 22MB store plus a 22MB reload is about 166 GB/s, which is this machine's memory bandwidth. The pass break is the store and the load.
 
 **That closes the model, and two independent numbers fit it.** The engine's 57ms divided by 0.266ms is roughly 200 render passes a frame, which explains the exact linear scaling in pixels. And the flush A/B agrees: interleaved on the frozen scene, baseline 17.51 against 16.19 with a `glFlush` before every immediate-mode batch, faster in 9 of 9 cycles, median delta 1.25 fps, sign test p = 0.0039. That 7.5% is 4.7ms, which is about 18 pass breaks, so this scene issues about 18 immediate-mode batches a frame. **This also settles the contradiction in this document about the flush: it is neither the 1.67x once claimed nor the nothing later measured, it is 7.5%.**
+
+**`MacHiDPIRendering = 0` is not the win it looks like, measured 2026-08-03.** The config option already exists and its description promises "a quarter of the pixels to draw and read back", which is true and does not help. Three frozen focused runs:
+
+| contentsScale | render target | window on screen | fps | frame |
+|---|---|---|---|---|
+| 2.0, native | 3024x1832, 5.54 Mpixel | 5.54 Mpixel | 15.9 | 62.9ms |
+| 2.0, native | 1512x916, 1.38 Mpixel | 1.38 Mpixel | 65.0 | 15.4ms |
+| 1.0, non-native | 1512x916, 1.38 Mpixel | 5.54 Mpixel | 21.3 | 47.0ms |
+| 1.0, non-native | 756x458, 0.35 Mpixel | 1.38 Mpixel | 24.9 | 40.2ms |
+
+So turning it off gives 1.34x, not the 4x the pixel count predicts. The last row was run to discriminate three explanations, which predicted 85, 23 and over 150 fps. **It is a fixed cost: fit the two non-native rows and it is 37.9ms a frame plus 6.6ms a Mpixel rendered, so the render size barely matters once you are on that path.** 38ms is not a multiple of the 120Hz refresh interval, and it sits inside `Misc::SwapBuffers` at 91.7%, so it looks like a stall rather than work. The mechanism is not established. The obvious suspect is the compositor having to upscale a layer whose `contentsScale` does not match the display's.
+
+**The native-scale rows fit better than the first write-up of them claimed.** 11.4ms a Mpixel through the origin, no fixed term. But note the confound that the fourth row exposes: those two rows changed the window's size on screen and the render size together, so on their own they could not attribute the 4x to either. The non-native rows are what rule the screen-area explanation out, because shrinking the window there bought only 6.8ms.
+
+**What this says to do instead.** Keep `contentsScale` at the display's, so the layer stays native and the 38ms never appears, and shrink the pbuffer alone. The present already samples the IOSurface through a linear filter into a full size drawable, so an undersized IOSurface upscales for free there. That is ExaDev's `SPRING_DOWNSAMPLE_READBACK` shape rather than their `SPRING_MAC_NO_RETINA` one, and at native scale it should give the 11.4ms a Mpixel win: roughly 55 to 60 fps at the default window. It needs the pbuffer size decoupled from `MacMetalPresent_GetDrawableSize`, which S6 deliberately tied together, so it is a real change to the present sizing rather than a config flip.
+
+**What ExaDev already has, checked 2026-08-03.** Two performance commits on `macos-layer`, and most of it is already here.
+
+- `82c22270f3` P and E core split plus a QOS hint for sim workers. **Already in this tree**, `CpuTopology.cpp` reads the `hw.perflevel*` keys and `Threading.cpp` calls `pthread_set_qos_class_self_np`. It cannot help a draw bound frame anyway, since the CPU is idle, but it should matter on a busy sim.
+- `c990c4e301` viewport must match the FBO, not the drawable. **Already satisfied**, differently and better: S6 made `winSize` come from `MacEGL::GetSurfaceSize()` and derives `pixelsPerPoint` from the ratio.
+- `931f677cdd` async PBO readback, downsample and timing knobs. **Not ported.** Its claim is 3x in busy scenes, 41ms sync against 13ms with the PBO, on the strength of the PBO hiding the `glReadPixels` pipeline drain behind a frame of latency. That conflicts with S3's measurement here that `glReadPixels` into a PBO still blocks on this driver, so it buys no run-ahead and costs 0.7ms a frame extra. It also conflicts with the `nopresent,finish` result, which kept the drain and removed only the copy and present for 3%. Both could still be true, since their number is a different scene on June's post-Metal4 Mesa, and the S3 figure was taken on the main menu, which draws almost nothing. **It is one interleaved run to settle, once the knob is ported: `-` against `nopbo`.**
 
 **So the lever is the number of render passes, or making a pass not store and reload the whole attachment.** Two directions, and they are not exclusive:
 
