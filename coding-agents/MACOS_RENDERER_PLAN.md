@@ -1202,6 +1202,14 @@ The control run is formally void on focus, 5 of 45 polls, but the losses start a
 
 **So the bisect that would settle it**, and it is one run: the probe freezes the scene, then issues `luaui disable`. That removes the probe with it, but the freeze survives, because pause is engine state and nothing is left to move the camera, and `SPRING_DIAG_CELLS` logs the frame rate from the engine rather than from Lua. Running Metal Factions or MCL on the same map is the other half, a real game with real units against which SplinterFaction can be judged.
 
+**Start here next, in this order.**
+
+1. **`luaui disable` after the freeze**, as above. Splits the missing 50ms into the game's interface and effects against its unit materials. One run.
+2. **Spawn a fixed set of units from a gadget**, so a scene is a known quantity rather than whatever the game's own spawn logic left behind. Every frame rate in this document was measured with `units=1`, which is not representative of play, and the same gadget in two games makes them comparable for the first time. Note Empty Mod cannot host it without unit definitions, so this belongs in a game that has them, or in a loose `LuaRules/main.lua` in the data dir, which is known to load because `LuaIntro/main.lua` does.
+3. **Metal Factions or MCL on the same map.** Neither has ever been started on this renderer, which section 2b lists as unverified, so this tests two things at once.
+
+Not worth retrying, all measured: the present path, cheaper CPU-side drawing, raw fill, render scaling, `MacHiDPIRendering = 0`, and the engine feature sweep.
+
 **The engine-side feature sweep was negative, which agrees with that.** `AllowDeferredMapRendering = 0`, `AllowDeferredModelRendering = 0`, `CubeTexSizeReflection = 128`, `CubeTexGenerateMipMaps = 0` and `Water = 0` together give 17.0 fps against 15.9, which is inside the run-to-run drift. So the cost is in the game's own drawing rather than in engine features it switches on.
 
 **Two traps this sweep walked into, both worth not repeating.**
