@@ -17,7 +17,10 @@ shift 2
 
 BUILD=/Users/tomjn/dev/RecoilEngine/build-macos-legacy
 SCRIPT=/Users/tomjn/dev/RecoilEngine/coding-agents/test-scripts/splinterfaction-fixed-start.txt
-LAUNCHER=${LAUNCHER:-./run-macos.sh}
+# Default to the pre-Metal4 Mesa. 26.2.0-rc3 carries c08dba83025, which never
+# reclaims the memory a render pass allocates, and the engine dies at about 12
+# seconds. Set LAUNCHER=./run-macos.sh to go back to it for an A/B.
+LAUNCHER=${LAUNCHER:-./run-macos-premtl4.sh}
 
 # kill above this many kilobytes of resident memory
 # 16 GB of physical RAM on this machine, usually with a colima VM alongside, so
