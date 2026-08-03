@@ -1140,7 +1140,19 @@ Rows 1, 2, 3 and 5 fit `3.9ms x rendered Mpixel + 7.5ms x window Mpixel on scree
 
 **The hypothesis, not established: we are contending with WindowServer.** Its compositing cost scales with the window's area on screen and it keeps compositing whether or not we present, which would explain why removing our present changes nothing, and why row 4, where the compositor also has to magnify, is worse than its render size predicts. Three ways to test it, none tried. A 1x external display, so no scaling is needed anywhere. Sampling WindowServer's own GPU time with Metal System Trace. Or comparing an occluded window, remembering that macOS throttles occluded apps and that confound is what voided earlier runs.
 
-**Practical consequence for `MacRenderScale`.** Under the fit, the screen-area term is 41ms of the 46ms frame at the default window, so even 0.25 would only reach about 23 fps. **The knob is capped at roughly 1.5x however far it is pushed**, and 0.75 buys about 1.15x for visibly softer glyphs. It stays in as a measurement tool and an honest small win, not as the answer. A per-target scale, world reduced and UI at full, would fix the text cost but needs separate render targets.
+**`MacRenderScale` is fully characterised, and there is a 41.6ms floor.** Three frozen focused runs at the default 1512x916 point window:
+
+| scale | render | fps | model |
+|---|---|---|---|
+| 1.0 | 5.54 Mpixel | 15.9 | 15.8 |
+| 0.75 | 3.12 Mpixel | 18.9 | 18.6 |
+| 0.5 | 1.38 Mpixel | 21.5 | 21.3 |
+
+`3.9ms a Mpixel rendered + 41.6ms` predicts all three within 2%, so this is a line rather than three loose numbers, which matters because the 0.75 gain of 1.19x is smaller than the 10% run-to-run drift and could not have been trusted on its own.
+
+**So 24 fps is the ceiling at this window size** whatever the scale, and the 41.6ms floor is the only thing left worth attacking. On quality, 0.75 was judged clearly better than 0.5 by eye and gives 1.19x, which makes it the usable point if anyone wants the trade. A per-target scale, world reduced and UI at full, would remove the text cost but needs separate render targets.
+
+**Do not leave a non-default `MacRenderScale` in the test config.** A stale non-default in `~/dev/spring-testdata/springsettings.cfg` is exactly the shape of the contaminated negative control that already cost this project a session.
 
 **What ExaDev already has, checked 2026-08-03.** Two performance commits on `macos-layer`, and most of it is already here.
 
