@@ -601,6 +601,49 @@ Worth knowing anyway, and separable from macOS: `ReplaceMouseCursor` swaps the n
 
 ---
 
+**The resource bar, settled 2026-08-03. It is the batching bug inside display lists**
+
+The missing icons, the missing panel accent strips and the skewed panels are not a second defect. They are the immediate-mode batching bug, compiled into a display list where the mitigation cannot reach.
+
+`glFlush` is executed immediately during list compilation and is never recorded into the list. So `glBeginBatch` flushes at compile time, which is useless, and at replay time the corrupted batches are already baked in. The corruption is therefore deterministic: two screenshots a hundred draws apart are pixel identical, and deleting and rebuilding the lists mid-game reproduces the same corruption exactly.
+
+What separates what renders from what does not is which GL path the call takes, measured by instrumenting the widget:
+
+| widget call | GL path | result |
+|---|---|---|
+| `gl.Rect` | `glRectf`, expanded inside Mesa | always renders |
+| `gl.TexRect`, `gl.BeginEnd` | `glBegin` through `glBeginBatch` | corrupted or lost |
+
+Untextured `gl.Rect` markers injected into the same lists, immediately beside the failing draws and inside the same font `Begin`/`End` block, render on every panel every frame. The textured draws next to them do not.
+
+Four theories died on the way and none should be retried. **Display list churn:** the accents and icons live in lists built once, not in the per-frame rebuilt one. **Textured quads in lists:** a standalone probe renders all six of the widget's textures live, from a list, and colour modulated, on Zink. **PNG versus DDS:** the correlation is real in the screenshots and spurious as a cause, since the DDS draws simply sit at different positions in the batch sequence. **Lists compiled too early:** rebuilding them at draw 240 changes nothing.
+
+This confirms the plan's own conclusion that the real fix is `LuaOpenGL` not using immediate mode. No flush-based mitigation can cover content that compiles immediate mode into display lists, and 47 widgets do.
+
+Two traps, both of which produced confident wrong answers before being caught by a control:
+
+- A probe widget drawing about thirty quads and replaying six display lists made **every other widget's UI vanish entirely**. The instrument destroyed what it measured. Always run the same scene with the probe disabled before believing anything.
+- The first probe drew pale textures on a white backdrop, where "did not draw" and "drew correctly" look identical. Use a mid grey backdrop and a saturated colour modulate.
+
+Useful mechanics for the next session. The widget can call `Spring.SendCommands("screenshot")` on a frame counter, which writes full resolution PNGs to `<datadir>/screenshots` unattended, and those are far more readable than the quarter size phase dumps. `sips --cropOffset` is not an absolute top-left offset and silently crops the wrong region, so `coding-agents/test-scripts/crop.py` crops PPM and PNG by absolute coordinates instead.
+
+---
+
+**The glCallList flush does not help, measured 2026-08-03**
+
+Step 1 of the previous session's list is closed. Ten interleaved runs on one binary, `SPRING_NO_LIST_FLUSH` switching the `glCallList` half of the mitigation at runtime so the sides could not be confounded by anything drifting between two builds.
+
+| side | frames corrupted | per run |
+|---|---|---|
+| flush on | 64/186, 34.4% | 15.0 27.7 28.2 96.4 21.9 |
+| flush off | 31/170, 18.2% | 19.0 21.7 9.1 15.6 21.4 |
+
+No significant difference on a rank test of the per run rates, U = 4 with n = 5 a side, two tailed p > 0.05. There is no evidence it helps and a weak trend the other way, so `glCallListBatch` was removed. The display list finding above explains why it could never have worked.
+
+**The detector was blind to half the artefact.** It counted strongly red pixels only. The artefact takes the colour of whichever batch was corrupted, and a full screen lavender variant reads as clean under a red-only rule. Count red, magenta and lavender, and score absolutely rather than against a per run baseline: one run had 27 of 28 frames corrupted, which moved its own median baseline to 752008 and scored a catastrophic run as mild.
+
+---
+
 **The invisible cursor is not an engine bug, on current evidence**
 
 Every candidate is ruled out by measurement rather than reading. `HardwareCursorApple::IsValid()` returns false unconditionally, so macOS always takes the software path and `SetCursor` hides the OS cursor, which is why nothing else can be covering for it. Instrumenting `CMouseCursor::Draw` in a real run gives a wholly healthy draw: `frames=1`, a valid texture, a valid shader, `viewSize=<2760,1720>`, and matrix params that put a 32x32 quad exactly at the pointer.
