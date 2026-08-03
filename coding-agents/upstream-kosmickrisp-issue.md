@@ -20,7 +20,7 @@ meson setup build-zink --buildtype=release \
 
 ### Describe the issue
 
-I hit this porting a game engine to macOS. On zink over kosmickrisp the memory a render pass allocates never comes back, so footprint tracks how many render passes the process has ever issued rather than how many are alive. It happens on every run.
+I hit this porting the Recoil RTS engine, a fork of SpringRTS, to macOS. On zink over kosmickrisp the memory a render pass allocates never comes back, so footprint tracks how many render passes the process has ever issued rather than how many are alive. It happens on every run.
 
 The attached reproducer makes a 512x512 RGBA texture, allocates every mip level, calls `glGenerateMipmap`, deletes the texture, and loops. It never draws and never presents. `glGenerateMipmap` is one blit per mip level, so one render pass each.
 
@@ -39,7 +39,7 @@ This is not work sitting in a queue. That 2626 MiB is measured after a full `glF
 
 `SYNC=1` does not free anything either, it just stops more than one render pass being in flight at a time. My guess is that the pool grows to the high-water mark of concurrent render passes and never shrinks, but I have not confirmed that.
 
-Throttling submission does not help. In the real application I tried a `glFinish` per texture, a zink flush every 64 blits, a flush plus timeline wait every 32 blits, `ZINK_DEBUG=sync`, and dropping the `batch_states_count` throttle in `post_submit` from 5000 to 8. I checked each one actually fired. None of them bounded the footprint, which would follow if a single batch state can hold thousands of render passes.
+Throttling submission does not help. In the engine I tried a `glFinish` per texture, a zink flush every 64 blits, a flush plus timeline wait every 32 blits, `ZINK_DEBUG=sync`, and dropping the `batch_states_count` throttle in `post_submit` from 5000 to 8. I checked each one actually fired. None of them bounded the footprint, which would follow if a single batch state can hold thousands of render passes.
 
 ### Regression
 
@@ -78,4 +78,4 @@ How I narrowed it down, in case it saves anyone the same afternoon:
 
 One measurement gotcha, if anyone else digs into this on Apple Silicon: use `phys_footprint`, not RSS. IOAccelerator allocations are real memory here and RSS cannot see them at all. I had 50 GB of footprint showing as 1349 MB of RSS.
 
-On severity, since it may not be obvious from a synthetic reproducer. This is the Recoil RTS engine, a fork of SpringRTS. One level load issues 102000 Metal command buffers in 12 seconds, 68177 render passes and 33823 compute, and hits 30 to 41 GiB before the OOM killer takes it. On `56588ef0665` the same load finishes and sits flat at 7.3 GiB. Before I capped my test runs, one reached 54 GB and I had to power cycle the machine to get it back. Once memory is high it also aborts inside `kk_CmdBeginRendering` when Metal can no longer create a render command encoder, which I assume is just exhaustion rather than a second bug.
+The reproducer makes this look milder than it is, so for severity, here is what it does to the engine. One level load issues 102000 Metal command buffers in 12 seconds, 68177 render passes and 33823 compute, and hits 30 to 41 GiB before the OOM killer takes it. On `56588ef0665` the same load finishes and sits flat at 7.3 GiB. Before I capped my test runs, one reached 54 GB and I had to power cycle the machine to get it back. Once memory is high it also aborts inside `kk_CmdBeginRendering` when Metal can no longer create a render command encoder, which I assume is just exhaustion rather than a second bug.
