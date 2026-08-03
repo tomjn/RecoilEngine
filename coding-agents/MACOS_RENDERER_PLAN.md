@@ -693,17 +693,24 @@ The failure of judgement that led to it is worth recording too. A 50 GB figure w
 
 ---
 
-**The leak is in KosmicKrisp. One `glGenerateMipmap` leaks about 23 MiB, measured 2026-08-03**
+**The leak is in KosmicKrisp. Queued mipmap generation costs about 26 MiB a texture and nothing throttles it, measured 2026-08-03**
 
-There is a standalone reproducer in about 40 lines of GL. `leak_probe` in mipmap mode creates a 512x512 RGBA texture, allocates every mip level, calls `glGenerateMipmap`, then deletes the texture. Three configurations, 300 textures each:
+`coding-agents/test-scripts/kk_mipmap_leak.c` is a self-contained reproducer, EGL and libGL only, a core 3.3 context and no drawing at all. It creates a 512x512 texture, allocates every mip level, calls `glGenerateMipmap`, deletes the texture, and repeats. It reports its own `phys_footprint` through `task_info`, so it needs no external tooling. 100 textures, one binary, switched by environment variable:
 
-| configuration | result |
+| configuration | `phys_footprint` |
 |---|---|
-| Zink over KosmicKrisp, `glGenerateMipmap` on | killed at a 6 GiB ceiling before finishing |
-| Zink over KosmicKrisp, `glGenerateMipmap` off | completed, 3 MiB |
-| llvmpipe, `glGenerateMipmap` on | completed, 1 MiB |
+| Zink over KosmicKrisp, `glGenerateMipmap`, no sync | 2626 MiB |
+| Zink over KosmicKrisp, `NO_GENMIP=1`, no sync | 224 MiB |
+| Zink over KosmicKrisp, `glGenerateMipmap`, `SYNC=1` | 161 MiB |
+| llvmpipe, `glGenerateMipmap`, no sync | 36 MiB |
 
-Run to completion at smaller counts it is linear: 661 MiB for 25 textures, 992 MiB for 50, 2339 MiB for 100. That is roughly 23 MiB per call, against a 1.33 MiB texture, and the texture is deleted immediately so nothing the probe holds can account for it. `SPRING_PROBE_MIPMAP=1` selects the mode and `SPRING_PROBE_NO_GENMIP=1` is the control.
+Linear with count: 661 MiB at 25 textures, 992 at 50, 2339 at 100. The texture is deleted every iteration, so nothing the probe holds accounts for it.
+
+**It is not memory that is never freed.** A `glFinish` per iteration drains it completely, 161 MiB against 2626 MiB. What grows without bound is queued work that has not retired, with nothing applying back-pressure. Zink's only throttles are `check_oom_flush` on `bs->resource_size` and `batch_states_count > 5000` in `post_submit`, and both are blind to what a command buffer costs inside KosmicKrisp.
+
+`MESA_GL_VERSION_OVERRIDE=4.6` is needed or the core context fails to make current. `leak_probe.c` carries the same loop under `SPRING_PROBE_MIPMAP=1` with `SPRING_PROBE_NO_GENMIP=1` as its control, but `kk_mipmap_leak.c` is the one to hand upstream.
+
+**Watch out for the in-loop numbers.** Without `SYNC=1` the footprint reads 236 MiB at texture 90 and then jumps to 2626 MiB at the closing `glFinish`, because the cost lands when the queue drains rather than where it was incurred. Sampling the loop and stopping there reads as a much smaller problem than it is.
 
 **The mechanism, in the order it was established.** Each step ruled out the layer above it, so do not re-derive them.
 
@@ -732,7 +739,16 @@ The flush and sync theories were both wrong for the same reason: the command buf
 
 **Traps that cost time here.** `footprint -p $!` after `timeout 120 cmd &` measures the `timeout` wrapper, not the program, and reports a flat 1 MiB while the real process is taking gigabytes. `heap` needs `-s` for sort by size, and `malloc_history` needs `MallocStackLogging=1` set before the process starts. A probe that leaks at this rate can freeze the machine exactly as the engine did, so cap it too.
 
-**What this means for the port.** The engine cannot fix this. It is a driver defect and the next step is the upstream report, for which the probe above is a complete reproducer. The only engine-side lever is calling `glGenerateMipmap` less, since `RecoilBuildMipmaps` calls it for every texture including ones whose mips are already in the file.
+**Both obvious engine mitigations are dead. Do not build either.**
+
+- Skipping `glGenerateMipmap` when the file already carries mips is **already implemented**. `HandleDDSMipmap` in `Bitmap.cpp` only calls it when `numEmbeddedLevels == 0`.
+- Skipping it when only one level is requested saves nothing. Mesa's `st_generate_mipmap` already returns early at `lastLevel == 0`, so the many `reqNumLevels = 1` call sites cost nothing today.
+
+**Mipmaps are a minority of the engine's growth anyway.** Splitting the KosmicKrisp counters by encoder type over a load gives 68177 render passes against 33823 compute, and only 8000 of those render passes are blits. So `glGenerateMipmap` is at most 8% of it and ordinary drawing and texture upload are the rest. There is no engine change that avoids render passes.
+
+**Unreconciled, and worth resolving before trusting any throttling story.** In the standalone probe a `glFinish` per iteration bounds the growth completely. In the engine, four separate synchronisation points changed nothing: a per-frame `glFinish`, `ZINK_BLIT_FLUSH=64`, `ZINK_BLIT_SYNC=32` for a flush plus timeline wait inside `zink_blit`, and `ZINK_DEBUG=sync`. Either the engine reaches its peak between two syncs, since a load uploads thousands of textures per drawn frame, or those particular waits did not drain what they were meant to. The `ZINK_BLIT_SYNC` stall was verified to fire, 247 times over 8000 blits, but not verified to actually drain.
+
+The report draft is in `coding-agents/upstream-kosmickrisp-memory-report.md`, including where it should be filed and why.
 
 ---
 
