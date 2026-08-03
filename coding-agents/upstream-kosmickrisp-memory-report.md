@@ -1,6 +1,21 @@
-# Upstream report: unbounded memory growth from queued mipmap generation on zink over kosmickrisp
+# Upstream report: kosmickrisp memory regression from Metal4 command encoding
 
 Draft for <https://gitlab.freedesktop.org/mesa/mesa/-/issues>. Not filed yet.
+
+## Summary
+
+`c08dba83025`, "kk: Move to Metal4 command encoding", 2026-06-16, made every render pass take its own `MTL4CommandBuffer` and `MTL4CommandAllocator`. The memory behind them is not returned when they are released, so process footprint grows with the number of render passes ever issued and never comes back.
+
+Bisected against the immediately preceding commit, `56588ef0665`, built from the same tree with the same options and driven by the same binary. 100 mipmapped textures:
+
+| | peak | after 5s idle |
+|---|---|---|
+| `56588ef0665`, pre-Metal4 | 482 MiB | 369 MiB |
+| `mesa-26.2.0-rc3`, post-Metal4 | 2626 MiB | 2624 MiB |
+
+A real application makes this fatal. One level load reaches 30 to 41 GiB in 12 seconds and is killed, against a stable 7.3 GiB plateau over a clean 60 second run on the pre-Metal4 commit.
+
+Every released 26.2 tag contains the regression, and 26.1 cannot run zink at all because `nullDescriptor` support only landed on 2026-05-11 in MR 41313. So there is no released Mesa on which this works.
 
 ## Where this goes and why
 
@@ -8,9 +23,9 @@ File it in **mesa/mesa against kosmickrisp**. All three candidates live in that 
 
 - **Not mesa core.** llvmpipe runs the identical GL calls through the identical state tracker path and stays flat, so `st_generate_mipmap` and the GL layer are not implicated.
 - **Not zink, mostly.** Zink's own device memory accounting is flat: 2.3 GiB over 301 `vkAllocateMemory` calls while the process reached 28 GiB. Zink asks for a lot of render passes, which is legal, and it cannot see what each one costs underneath.
-- **Kosmickrisp.** `cs_start_render` and `kk_start_compute_encoder` each create a new `MTL4CommandBuffer` plus encoder, and the IOAccelerator allocations behind one are held until the work retires. Measured at roughly 2.5 MiB per render pass. That is the disproportionate part.
+- **Kosmickrisp.** `cs_start_render` and `kk_start_compute_encoder` each create a new `MTL4CommandBuffer` plus encoder, and the IOAccelerator allocations behind one are never returned. Measured at roughly 2.5 MiB per render pass. Bisected to `c08dba83025`, so this is a regression rather than long-standing behaviour.
 
-One honest caveat to include when filing: this has not been isolated below kosmickrisp, so whether Metal itself is slow to reclaim, or kosmickrisp is asking for too much per encoder, is not established. Either way the design choice of one command buffer per encoder is kosmickrisp's.
+One honest caveat to include when filing: this has not been isolated below kosmickrisp, so whether Metal itself fails to reclaim, or kosmickrisp is asking for too much per encoder, is not established. The bisect settles which change introduced it either way.
 
 Worth mentioning in the same report, because a maintainer will ask: zink's only back-pressure is `check_oom_flush` on `bs->resource_size` and a throttle in `post_submit` at `batch_states_count > 5000`. Both are blind to per-command-buffer driver cost, so on this driver nothing throttles.
 
@@ -18,7 +33,7 @@ Worth mentioning in the same report, because a maintainer will ask: zink's only 
 
 - Mesa 26.2.0-rc3, built from source at `29b9c04a0da` (2026-07-29)
 - zink over kosmickrisp, `EGL_PLATFORM=surfaceless`
-- Apple M1 Pro, 16 GB, macOS 15 (Darwin 25.5.0)
+- Apple M1 Pro, 16 GB, macOS 26.5.2 (Darwin 25.5.0)
 - The relevant code is unchanged on `origin/main` as of 2026-08-02: `mtl_new_command_buffer` is still called per render pass in `kk_cmd_buffer.c`, and the release path is the same.
 
 ## Reproducer

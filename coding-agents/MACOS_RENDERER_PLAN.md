@@ -767,6 +767,39 @@ The report draft is in `coding-agents/upstream-kosmickrisp-memory-report.md`, in
 
 ---
 
+**It is a regression, and the engine is playable on the commit before it. Settled 2026-08-03**
+
+The cause is `kk: Move to Metal4 command encoding`, `c08dba83025`, 2026-06-16. Before it, KosmicKrisp took command buffers from a Metal 3 command queue, which owns their memory and recycles it. After it, every render pass takes its own `MTL4CommandBuffer` from the device plus a `MTL4CommandAllocator` that only reclaims on reset.
+
+**This is why nobody else has hit it.** ExaDev's shipped release is `engine-macos-arm64-2026.06.08-gaefcef0`, eight days before that commit, and it bundles `libgallium-26.2.0-devel.dylib`, the same name our pre-Metal4 build produces. The working window is narrow and worth writing down, because both edges are hard:
+
+- **2026-05-11** MR 41313 adds `nullDescriptor` to KosmicKrisp. Without it Zink refuses to start at all, which is why Homebrew's Mesa 26.1.4 cannot be used as a control. It fails with `Zink requires the nullDescriptor feature of KHR/EXT robustness2`.
+- **2026-06-16** Metal4 command encoding lands and the memory behaviour breaks.
+
+Anything built between those two dates works. `26.2-branchpoint` and every `26.2.0-rc` contain the Metal4 commit, so there is no released tag that is usable.
+
+**Measured, one probe, two prefixes.** `kk_mipmap_leak` at 100 textures:
+
+| | peak | after 5s idle |
+|---|---|---|
+| post-Metal4, `mesa-26.2.0-rc3` | 2626 MiB | 2624 MiB |
+| pre-Metal4, `56588ef0665` | 482 MiB | 369 MiB |
+
+Pre-Metal4 also gives the memory back, and scales sublinearly rather than at a flat rate: 482 MiB at 100 textures, 938 at 200, 2060 at 500, 3204 at 1000, so 4.8 MiB a texture falling to 3.2. Post-Metal4 is a flat 26 MiB a texture that is never returned.
+
+**The engine result is the one that matters.** A 60 second run on pre-Metal4 exited cleanly, the first clean run of the session. Footprint climbed to about 7.1 GiB during load and then sat between 7.2 and 7.4 GiB for the remaining 38 seconds. The same run post-Metal4 dies at 12 seconds somewhere between 30 and 41 GiB.
+
+**The setup.**
+
+- `~/dev/mesa-install-premtl4` is the prefix, built from `~/dev/mesa` branch `premtl4` at `56588ef0665` using the recipe in section 2 with the prefix changed.
+- `build-macos-legacy/run-macos-premtl4.sh` is the launcher. Pass it to the harness as `LAUNCHER=./run-macos-premtl4.sh coding-agents/test-scripts/run-capped.sh ...`.
+- It relinks `spring-premtl4` automatically whenever `spring` is newer, so the stale-copy trap that `spring-staging` has cannot happen here.
+- `~/dev/mesa` branch `macos-diagnostics` at `337c87ae087` carries the instrumentation, on top of the post-Metal4 tree it was written against. That is where the counters live now, not in the working tree.
+
+**What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
+
+---
+
 **The glCallList flush does not help, measured 2026-08-03**
 
 Step 1 of the previous session's list is closed. Ten interleaved runs on one binary, `SPRING_NO_LIST_FLUSH` switching the `glCallList` half of the mitigation at runtime so the sides could not be confounded by anything drifting between two builds.
