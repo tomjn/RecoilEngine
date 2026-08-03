@@ -16,11 +16,20 @@
 //     -Wl,-rpath,/opt/homebrew/opt/vulkan-loader/lib
 //
 // usage: leak_probe [frames] [batches-per-frame]
+//
+// SPRING_PROBE_MIPMAP switches to the shape the engine actually leaks on. The
+// engine reaches tens of GiB during a level load, and the growth tracks the
+// number of Metal command buffers kosmickrisp creates rather than the number
+// of frames drawn: about six IOAccelerator regions per command buffer, none of
+// them returned when it is released. glGenerateMipmap is one blit per mip
+// level, each blit a render pass and so a command buffer, which is why
+// RecoilBuildMipmaps over a map's worth of textures is what triggers it.
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 typedef unsigned int GLenum;
@@ -37,7 +46,15 @@ typedef float GLfloat;
 #define GL_MODELVIEW        0x1700
 #define GL_PROJECTION       0x1701
 
+#define GL_TEXTURE_2D       0x0DE1
+#define GL_RGBA8            0x8058
+#define GL_RGBA             0x1908
+#define GL_UNSIGNED_BYTE    0x1401
+#define GL_TEXTURE_MIN_FILTER 0x2801
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+
 #define SIZE 512
+#define TEXSIZE 512
 
 static void (*p_glClearColor)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (*p_glClear)(GLbitfield);
@@ -53,6 +70,12 @@ static void (*p_glDisable)(GLenum);
 static void (*p_glMatrixMode)(GLenum);
 static void (*p_glLoadIdentity)(void);
 static const GLubyte* (*p_glGetString)(GLenum);
+static void (*p_glGenTextures)(GLsizei, unsigned int*);
+static void (*p_glDeleteTextures)(GLsizei, const unsigned int*);
+static void (*p_glBindTexture)(GLenum, unsigned int);
+static void (*p_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+static void (*p_glTexParameteri)(GLenum, GLenum, GLint);
+static void (*p_glGenerateMipmap)(GLenum);
 
 #define LOAD(n) \
 	p_##n = (void*)eglGetProcAddress(#n); \
@@ -91,6 +114,54 @@ int main(int argc, char** argv)
 	LOAD(glClearColor); LOAD(glClear); LOAD(glViewport); LOAD(glBegin); LOAD(glEnd);
 	LOAD(glVertex2f); LOAD(glColor3f); LOAD(glTexCoord2f); LOAD(glFinish); LOAD(glFlush);
 	LOAD(glDisable); LOAD(glMatrixMode); LOAD(glLoadIdentity); LOAD(glGetString);
+	LOAD(glGenTextures); LOAD(glDeleteTextures); LOAD(glBindTexture);
+	LOAD(glTexImage2D); LOAD(glTexParameteri); LOAD(glGenerateMipmap);
+
+	if (getenv("SPRING_PROBE_MIPMAP") != NULL) {
+		// what RecoilBuildMipmaps does for every texture a map or unit set
+		// needs: allocate every mip level, then generate them
+		unsigned char* pixels = malloc((size_t)TEXSIZE * TEXSIZE * 4);
+		memset(pixels, 0x80, (size_t)TEXSIZE * TEXSIZE * 4);
+
+		printf("mipmap mode, %d textures of %dx%d, pid %d\n", frames, TEXSIZE, TEXSIZE, (int)getpid());
+		fflush(stdout);
+
+		for (int t = 0; t < frames; t++) {
+			unsigned int tex = 0;
+			p_glGenTextures(1, &tex);
+			p_glBindTexture(GL_TEXTURE_2D, tex);
+
+			for (int level = 0, w = TEXSIZE, h = TEXSIZE; w >= 1 || h >= 1; level++) {
+				p_glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA8, w, h, 0,
+				               GL_RGBA, GL_UNSIGNED_BYTE, level ? NULL : pixels);
+				if (w == 1 && h == 1)
+					break;
+				w = (w > 1) ? w / 2 : 1;
+				h = (h > 1) ? h / 2 : 1;
+			}
+			p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+
+			// the control that separates "creating textures leaks" from "the
+			// blits behind glGenerateMipmap leak"
+			if (getenv("SPRING_PROBE_NO_GENMIP") == NULL)
+				p_glGenerateMipmap(GL_TEXTURE_2D);
+
+			// the engine keeps its textures, but deleting here makes the point
+			// sharper: nothing the probe holds can account for the growth
+			p_glBindTexture(GL_TEXTURE_2D, 0);
+			p_glDeleteTextures(1, &tex);
+
+			if ((t % 100) == 0) {
+				printf("texture %d\n", t);
+				fflush(stdout);
+			}
+		}
+
+		p_glFinish();
+		free(pixels);
+		printf("done\n");
+		return 0;
+	}
 
 	printf("GL_RENDERER = %s\n", p_glGetString(GL_RENDERER));
 	printf("frames=%d batches=%d, pid %d\n", frames, batches, (int)getpid());

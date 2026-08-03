@@ -693,6 +693,49 @@ The failure of judgement that led to it is worth recording too. A 50 GB figure w
 
 ---
 
+**The leak is in KosmicKrisp. One `glGenerateMipmap` leaks about 23 MiB, measured 2026-08-03**
+
+There is a standalone reproducer in about 40 lines of GL. `leak_probe` in mipmap mode creates a 512x512 RGBA texture, allocates every mip level, calls `glGenerateMipmap`, then deletes the texture. Three configurations, 300 textures each:
+
+| configuration | result |
+|---|---|
+| Zink over KosmicKrisp, `glGenerateMipmap` on | killed at a 6 GiB ceiling before finishing |
+| Zink over KosmicKrisp, `glGenerateMipmap` off | completed, 3 MiB |
+| llvmpipe, `glGenerateMipmap` on | completed, 1 MiB |
+
+Run to completion at smaller counts it is linear: 661 MiB for 25 textures, 992 MiB for 50, 2339 MiB for 100. That is roughly 23 MiB per call, against a 1.33 MiB texture, and the texture is deleted immediately so nothing the probe holds can account for it. `SPRING_PROBE_MIPMAP=1` selects the mode and `SPRING_PROBE_NO_GENMIP=1` is the control.
+
+**The mechanism, in the order it was established.** Each step ruled out the layer above it, so do not re-derive them.
+
+1. Zink's own device memory is not the leak. A patch counting bytes at zink's `vkAllocateMemory` and `vkFreeMemory` tops out at 2.3 GiB over 301 allocations while `phys_footprint` reaches 28 GiB. Zink suballocates, so thousands of GL textures were never going to appear as thousands of allocations.
+2. `vmmap -summary` puts the growth in `IOAccelerator (graphics)`, and it is region count that grows: 314, then 18636, then 51476, then 108971, reaching 12.5 GiB. `heap -s` names the classes, `IOGPUMetalPooledResource` going from 672 to 46842 and `MTLResourceList` from 42 to 2691.
+3. `malloc_history -allByCount` gives the call site. It is `zink_blit` to `kk_CmdBlitImage2` to `vk_meta_blit_image` to `kk_CmdBeginRendering` to `cs_start_render` to `mtl_new_render_command_encoder_with_descriptor`. `glGenerateMipmap` is one blit per mip level, and kosmickrisp starts a fresh MTL4 command buffer and render command encoder for every render pass.
+4. The command buffers are not held. Counters in `kk_cmd_buffer.c` show 102000 created in 12 seconds against 257520 resets, with live count never above 1000. Regions track the cumulative number created, about six regions each, not the number live. So the IOAccelerator allocations a command buffer makes are not returned when it is released.
+
+**Ruled out by measurement, all on one binary with runtime switches. Do not retry.**
+
+| theory | test | result |
+|---|---|---|
+| zink never flushes during a run of blits | `ZINK_BLIT_FLUSH=64` | no change, 31 GiB at t=12s |
+| flushing is not enough, it needs a wait | `ZINK_BLIT_SYNC=32` | no change, and the stall provably fired, 247 stalls over 8000 blits |
+| a GPU submission backlog | `ZINK_DEBUG=sync` | no change, 37 GiB at t=10s |
+| texture creation itself leaks | probe with `glGenerateMipmap` off | flat, 3 MiB over 300 textures |
+
+The flush and sync theories were both wrong for the same reason: the command buffers were never the thing being held. `zink_batch.c` hands out a brand new batch state whenever none has completed, so flushing harder only spreads the same work over more command pools, but that turned out not to matter either.
+
+**Tooling worth keeping.** `~/dev/mesa` carries four uncommitted diagnostic patches, all inert unless their environment variable is set, so a normal run is unaffected:
+
+- `zink_bo.c`, tracks live device memory and dumps the existing per-shape `ZINK_DEBUG=mem` stats on each step of growth, since upstream only prints them when an allocation fails. `ZINK_DEBUG=mem ZINK_MEM_STEP_MB=256 MESA_LOG_LEVEL=info`.
+- `zink_blit.c`, `ZINK_BLIT_FLUSH`, `ZINK_BLIT_SYNC` and `ZINK_BLIT_STATS`.
+- `kk_cmd_buffer.c`, `KK_CMD_STATS`, counts Metal command buffers created against released.
+- the older `vbo_exec_draw.c` `VBO_TRACE` patch from the batching bug.
+
+**Traps that cost time here.** `footprint -p $!` after `timeout 120 cmd &` measures the `timeout` wrapper, not the program, and reports a flat 1 MiB while the real process is taking gigabytes. `heap` needs `-s` for sort by size, and `malloc_history` needs `MallocStackLogging=1` set before the process starts. A probe that leaks at this rate can freeze the machine exactly as the engine did, so cap it too.
+
+**What this means for the port.** The engine cannot fix this. It is a driver defect and the next step is the upstream report, for which the probe above is a complete reproducer. The only engine-side lever is calling `glGenerateMipmap` less, since `RecoilBuildMipmaps` calls it for every texture including ones whose mips are already in the file.
+
+---
+
 **The glCallList flush does not help, measured 2026-08-03**
 
 Step 1 of the previous session's list is closed. Ten interleaved runs on one binary, `SPRING_NO_LIST_FLUSH` switching the `glCallList` half of the mitigation at runtime so the sides could not be confounded by anything drifting between two builds.
