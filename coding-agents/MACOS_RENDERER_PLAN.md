@@ -629,6 +629,34 @@ Useful mechanics for the next session. The widget can call `Spring.SendCommands(
 
 ---
 
+**Deferred Lua display lists, the fix, 2026-08-03**
+
+`gl.CreateList` keeps its recording function instead of compiling, and `gl.CallList` runs it, whenever `supportImmediateModeBatching` is false. That puts the drawing back on the live path where `glBeginBatch`'s flush applies. Gated on the measured capability, not on a platform, so this is a platform-neutral change that can go upstream ahead of the renderer.
+
+Verified on the resource bar: the four panel accents, all four icons and the research readout return, and the skew and hatching go. The user confirmed no red artefacts anywhere in that run.
+
+**Both halves are needed, and neither alone is enough.** With `SPRING_NO_BATCH_FLUSH=1`, deferral on and the flush off, every artefact returns including the load screen. Deferral moves list content to where the flush can act, the flush repairs it there.
+
+**The cost is mostly resolution.** 60 second runs, all three at 1280x720 on the built-in display:
+
+| configuration | frames | peak RSS |
+|---|---|---|
+| stock, no deferral, no flush | 1251 | 2852 MiB |
+| deferral + flush | 747 | 1970 MiB |
+| deferral, no flush | 1209 | 3014 MiB |
+
+1.67x slower here against 4.7x measured at 5120x2754, so most of what looked catastrophic was the window size. Run the harness windowed and small.
+
+**There is a pre-existing memory leak of roughly 2.3 MiB per drawn frame, and it is not the deferral.** The per-frame figures are 2.28 stock, 2.64 with deferral, 2.49 without the flush. It grows in stock behaviour too, and the deferral run creates no GL display lists at all, so recreated-but-unfreed lists cannot be the whole story. This is the plan's open question about IOAccelerator regions growing without bound, and on this evidence they do. Only peaks have been measured so far, not a series, so a cache that fills and plateaus is not yet excluded. `run-capped.sh` now writes an RSS series alongside the log, which settles it.
+
+The abort seen when memory is high is inside KosmicKrisp, `kk_CmdBeginRendering` to `cs_start_render` to `mtl_new_render_command_encoder_with_descriptor`. Metal cannot create a render command encoder and aborts the process, the same family as the compute-encoder abort recorded earlier.
+
+**This froze a machine, so read this before running anything.** An uncapped run reached 54 GB on a 16 GB machine, made the system unresponsive to the point that the out-of-memory dialog would not respond, and cost a hard power cycle. 54 GB was the ceiling it hit, not what it wanted. macOS has no cgroup and `ulimit -v` does not constrain Metal allocations, so **always launch through `coding-agents/test-scripts/run-capped.sh`**, which polls RSS and SIGKILLs at 3 GiB by default. A `gl.CreateList` count above 8192 is now refused by the engine for the same reason.
+
+The failure of judgement that led to it is worth recording too. A 50 GB figure was reported, `ps` was checked after the process had exited, nothing was found, and it was called benign virtual memory. The correct response to any report of runaway memory is to cap first and investigate second.
+
+---
+
 **The glCallList flush does not help, measured 2026-08-03**
 
 Step 1 of the previous session's list is closed. Ten interleaved runs on one binary, `SPRING_NO_LIST_FLUSH` switching the `glCallList` half of the mitigation at runtime so the sides could not be confounded by anything drifting between two builds.
