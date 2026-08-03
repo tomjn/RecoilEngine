@@ -77,9 +77,7 @@ static const GLubyte* (*p_glGetString)(GLenum);
 	p_##n = (void*)eglGetProcAddress(#n); \
 	if (!p_##n) { fprintf(stderr, "missing %s\n", #n); return 1; }
 
-// phys_footprint is the only number that means anything here. RSS does not
-// count IOAccelerator allocations at all: measured 50gb of footprint against
-// an RSS of 1349mb.
+// Reported via task_info so the probe needs no external tooling to be useful.
 static unsigned long footprint_mib(void)
 {
 	task_vm_info_data_t info;
