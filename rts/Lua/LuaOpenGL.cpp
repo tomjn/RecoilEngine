@@ -2192,8 +2192,8 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				const float yb = heightmap[ziOff + xib];
 				const float yt = heightmap[ziOff + xit];
 				const float z = zi * SQUARE_SIZE;
-				glVertex3f(xt, yt, z);
-				glVertex3f(xb, yb, z);
+				glVertex4f(xt, yt, z, 1.0f);
+				glVertex4f(xb, yb, z, 1.0f);
 			}
 			glEnd();
 		}
@@ -2216,9 +2216,9 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				const float yt = heightmap[ziOff + xit];
 				const float z = zi * SQUARE_SIZE;
 				glTexCoord2f(tut, tv);
-				glVertex3f(xt, yt, z);
+				glVertex4f(xt, yt, z, 1.0f);
 				glTexCoord2f(tub, tv);
-				glVertex3f(xb, yb, z);
+				glVertex4f(xb, yb, z, 1.0f);
 				tv += tvStep;
 			}
 			glEnd();
@@ -2443,13 +2443,13 @@ int LuaOpenGL::Vertex(lua_State* L)
 		const float y = lua_tofloat(L, -1);
 		lua_rawgeti(L, 1, 3);
 		if (!lua_isnumber(L, -1)) {
-			glVertex2f(x, y);
+			glVertex4f(x, y, 0.0f, 1.0f);
 			return 0;
 		}
 		const float z = lua_tofloat(L, -1);
 		lua_rawgeti(L, 1, 4);
 		if (!lua_isnumber(L, -1)) {
-			glVertex3f(x, y, z);
+			glVertex4f(x, y, z, 1.0f);
 			return 0;
 		}
 		const float w = lua_tofloat(L, -1);
@@ -2461,12 +2461,12 @@ int LuaOpenGL::Vertex(lua_State* L)
 		const float x = luaL_checkfloat(L, 1);
 		const float y = luaL_checkfloat(L, 2);
 		const float z = luaL_checkfloat(L, 3);
-		glVertex3f(x, y, z);
+		glVertex4f(x, y, z, 1.0f);
 	}
 	else if (args == 2) {
 		const float x = luaL_checkfloat(L, 1);
 		const float y = luaL_checkfloat(L, 2);
-		glVertex2f(x, y);
+		glVertex4f(x, y, 0.0f, 1.0f);
 	}
 	else if (args == 4) {
 		const float x = luaL_checkfloat(L, 1);
@@ -2875,10 +2875,10 @@ int LuaOpenGL::TexRect(lua_State* L)
 			t2 = 1.0f;
 		}
 		glBeginBatch(GL_QUADS); {
-			glTexCoord2f(s1, t1); glVertex2f(x1, y1);
-			glTexCoord2f(s2, t1); glVertex2f(x2, y1);
-			glTexCoord2f(s2, t2); glVertex2f(x2, y2);
-			glTexCoord2f(s1, t2); glVertex2f(x1, y2);
+			glTexCoord2f(s1, t1); glVertex4f(x1, y1, 0.0f, 1.0f);
+			glTexCoord2f(s2, t1); glVertex4f(x2, y1, 0.0f, 1.0f);
+			glTexCoord2f(s2, t2); glVertex4f(x2, y2, 0.0f, 1.0f);
+			glTexCoord2f(s1, t2); glVertex4f(x1, y2, 0.0f, 1.0f);
 		}
 		glEnd();
 		return 0;
@@ -2889,10 +2889,10 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const float s2 = luaL_checkfloat(L, 7);
 	const float t2 = luaL_checkfloat(L, 8);
 	glBeginBatch(GL_QUADS); {
-		glTexCoord2f(s1, t1); glVertex2f(x1, y1);
-		glTexCoord2f(s2, t1); glVertex2f(x2, y1);
-		glTexCoord2f(s2, t2); glVertex2f(x2, y2);
-		glTexCoord2f(s1, t2); glVertex2f(x1, y2);
+		glTexCoord2f(s1, t1); glVertex4f(x1, y1, 0.0f, 1.0f);
+		glTexCoord2f(s2, t1); glVertex4f(x2, y1, 0.0f, 1.0f);
+		glTexCoord2f(s2, t2); glVertex4f(x2, y2, 0.0f, 1.0f);
+		glTexCoord2f(s1, t2); glVertex4f(x1, y2, 0.0f, 1.0f);
 	}
 	glEnd();
 

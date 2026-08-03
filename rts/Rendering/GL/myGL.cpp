@@ -583,10 +583,36 @@ void glBeginBatch(GLenum mode)
 	// cost of re-running the Lua closures.
 	static const bool noBatchFlush = (getenv("SPRING_NO_BATCH_FLUSH") != nullptr);
 
-	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush)
+	// TEMP diagnostic, not for merge. off_probe finds a rule that is complete
+	// where the flush is not: 0 of 17 warm-up counts wrong against 1 of 17. It
+	// needs two things together, the full attribute set emitted once after every
+	// glBegin, and a vertex arity that never varies. Either alone is no better
+	// than drawing naively. The arity half is handled in LuaOpenGL, which now
+	// always emits glVertex4f. This is the other half, and it should also be far
+	// cheaper than a glFlush per batch, which serialises.
+	static const bool normalise = (getenv("SPRING_BATCH_NORMALISE") != nullptr);
+
+	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush && !normalise)
 		glFlush();
 
+	// glGet is not legal between glBegin and glEnd, so read the current values
+	// first. Re-emitting them is a no-op for what gets drawn, and it is the
+	// presence of the attributes rather than their values that fixes the format.
+	GLfloat col[4], txc[4], nrm[3];
+
+	if (normalise && !globalRendering->supportImmediateModeBatching) {
+		glGetFloatv(GL_CURRENT_COLOR, col);
+		glGetFloatv(GL_CURRENT_TEXTURE_COORDS, txc);
+		glGetFloatv(GL_CURRENT_NORMAL, nrm);
+	}
+
 	glBegin(mode);
+
+	if (normalise && !globalRendering->supportImmediateModeBatching) {
+		glColor4f(col[0], col[1], col[2], col[3]);
+		glTexCoord2f(txc[0], txc[1]);
+		glNormal3f(nrm[0], nrm[1], nrm[2]);
+	}
 }
 
 void ClearScreen()
