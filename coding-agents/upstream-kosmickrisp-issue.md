@@ -1,3 +1,10 @@
+<!--
+Submitted as https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15998
+This is a record of what was filed, not a draft. Editing it changes nothing.
+Anything the issue needs has to be edited in GitLab, by hand, since the tracker
+is behind Anubis.
+-->
+
 ### System information
 
 - OS: macOS 26.5.2, build 25F84
