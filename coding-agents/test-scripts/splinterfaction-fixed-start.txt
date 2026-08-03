@@ -23,7 +23,7 @@ numusers=1;
 numteams=1;
 startpostype=0;
 gametype=SplinterFaction 0.1.78;
-mapname=AcidicQuarry 5.17;
+mapname=Valles Marineris 2.6.1;
 myplayername=probe;
 numplayers=1;
 }

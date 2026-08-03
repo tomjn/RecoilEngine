@@ -835,6 +835,30 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			if (frameFinish)
 				glFinish();
 
+			// TEMP diagnostic, not for merge. The in-game readout gives 13 fps at
+			// 1280x720, but it cannot be read when a switch blanks the window, which is
+			// exactly the case the present readback has to be measured against. Log the
+			// rate instead so every A/B is comparable.
+			static const int fpsLog = []() {
+				const char* e = getenv("SPRING_FPS_LOG");
+				return (e != nullptr) ? std::atoi(e) : 0;
+			}();
+			if (fpsLog > 0) {
+				using clock = std::chrono::steady_clock;
+				static clock::time_point since = clock::now();
+				static uint32_t presents = 0;
+
+				presents++;
+				const auto elapsed = clock::now() - since;
+				if (elapsed >= std::chrono::seconds(fpsLog)) {
+					const double secs = std::chrono::duration<double>(elapsed).count();
+					LOG("[fps] %.1f over %.1fs, %u presents", presents / secs, secs, presents);
+					presents = 0;
+					since = clock::now();
+				}
+			}
+
+
 			// TEMP diagnostic, not for merge. VSync goes through
 			// SDL_GL_SetSwapInterval, which does nothing here because SDL owns
 			// neither the context nor the present, so nothing throttles the frame

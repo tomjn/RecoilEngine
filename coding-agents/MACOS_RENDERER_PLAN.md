@@ -796,6 +796,35 @@ Pre-Metal4 also gives the memory back, and scales sublinearly rather than at a f
 - It relinks `spring-premtl4` automatically whenever `spring` is newer, so the stale-copy trap that `spring-staging` has cannot happen here.
 - `~/dev/mesa` branch `macos-diagnostics` at `337c87ae087` carries the instrumentation, on top of the post-Metal4 tree it was written against. That is where the counters live now, not in the working tree.
 
+**Pre-Metal4 is not a clean win, 2026-08-03. Three things are worse than the first run suggested.**
+
+The first 60 second run exited cleanly at a 7.3gb plateau and that got called playable. Then a longer session on a second map produced all of the following.
+
+**The red batching artefact is back.** The user reports it during play on pre-Metal4. A screenshot at t=25s on AcidicQuarry showed a wholly correct frame, resource bar icons and all, so it is intermittent or content dependent rather than constant. It was not seen on post-Metal4 in this session. What decides it has not been established, and the obvious suspect is the capability probe behind `ForceImmediateModeFlush` reaching a different answer on this driver. Check what the probe decides before assuming the mitigation is even active.
+
+**The frame rate is 14 to 19 fps.** Measured unattended with the new `SPRING_FPS_LOG=<seconds>` switch, on Valles Marineris at 1280x720, windowed:
+
+| phase | fps |
+|---|---|
+| load screen | 45.3 |
+| first 10s of play | 13.9 |
+| steady, sim frames 300 to 5100 | 13.9 to 19.2 |
+
+The simulation runs at a full 30 ticks a second the whole time, 301 sim frames per 10 second window, so this is entirely a draw cost and not the sim. The user reports the same 15 to 20 by eye.
+
+**A run hard froze the machine and cost a second power cycle.** This one is not the memory failure and must not be confused with it. In the 54gb incident the cursor still moved and nothing else responded, which is thrash. This time the machine froze completely, cursor included, as the engine exited. That is the signature of a GPU or WindowServer hang.
+
+It matters because **`run-capped.sh` cannot protect against this**. The ceiling polls `phys_footprint`, and a GPU hang does not show up there. Peak was 7856mb, nowhere near the ceiling, and the harness reported a clean exit. No kernel panic was written, so there is nothing to read afterwards. Several earlier pre-Metal4 runs of 50, 60 and 100 seconds exited without freezing, so it is intermittent.
+
+Nothing here is understood yet. Do not treat a memory ceiling as making engine runs safe.
+
+**Two harness notes from the same session.**
+
+- The scratchpad under `/private/tmp` does not survive a reboot. Every log and screen capture from that session was lost and only the numbers already written down survived. Put anything worth keeping in the repo as it is measured, not at the end.
+- `run-capped.sh` reports elapsed time that runs well short of wall clock, because each poll shells out to `footprint` and `top` and those take about a second each. A run billed as 60 seconds took about 114.
+
+**The test map is now Valles Marineris 2.6.1**, symlinked into `~/dev/spring-testdata/maps/`. `mapname` in a start script is the mapinfo `name` plus its `version`, so `Valles Marineris 2.6.1`, not the archive filename. The autoselect test widget has been removed from the SplinterFaction copy.
+
 **What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
 
 ---
