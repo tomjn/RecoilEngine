@@ -914,9 +914,11 @@ The difference is obvious rather than marginal, so this is not a 6% residual bei
 | | run 1 | run 2 |
 |---|---|---|
 | flush | 16.2 | 16.0 |
-| arity | 16.4 | 19.2 |
+| arity | 16.4 | 19.2, not comparable |
 
-The spread between the two arity runs is wider than the gap between the two conditions, so the honest reading is no reliable difference, perhaps a slight gain. The 1.67x the flush was once measured at does not show up here. Whatever bounds the frame rate at 16 to 19 fps is not the flush, so that is where the next performance work belongs rather than in this mitigation.
+Three of those four ran unattended with no input at all, on whatever the opening camera shows. The fourth was noticed and played, a building was placed, and that is the 19.2. So the comparable set is 16.2, 16.0 and 16.4, which is no difference whatsoever. Removing the flush does not change the frame rate.
+
+Two things follow. The interactive run being the *fastest* is backwards for added work, so what is on screen matters more than what the player does, which is worth knowing before optimising. And every unattended fps figure in this document describes an idle opening camera rather than a played game, so none of them should be read as the frame rate of actual play. The 1.67x the flush was once measured at does not show up here. Whatever bounds the frame rate at 16 to 19 fps is not the flush, so that is where the next performance work belongs rather than in this mitigation.
 
 **off_probe now disagrees with the engine and the engine wins.** The probe puts uniform arity at 15 of 17 wrong however it is asked, and it is flatly wrong about this path. Either the probe's synthetic grid does not capture what LuaOpenGL does, or the load screen's corruption has a different cause than the grid's. Worth resolving before the probe is trusted for the next rule, since it has been the cheap way to test candidates without engine runs.
 
