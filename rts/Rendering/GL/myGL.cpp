@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <array>
-#include <atomic>
 #include <cstdlib>
 #include <vector>
 #include <string>
@@ -426,29 +425,6 @@ void RecoilBuildMipmaps(const GLenum target, GLint internalFormat, const GLsizei
 		glGenerateMipmap(target);
 	}
 
-	// Diagnostic, not for upstream. On zink over kosmickrisp the driver queues
-	// mipmap generation with no back-pressure and phys_footprint grows by about
-	// 26 MiB per texture until something synchronises, which a standalone probe
-	// reproduces exactly. SPRING_MIPMAP_SYNC=N drains every N textures so the
-	// engine can be checked against that, and SPRING_MIPMAP_STATS counts how
-	// many textures a load actually builds.
-	// See coding-agents/upstream-kosmickrisp-memory-report.md.
-	static const int syncEvery = []() {
-		const char* e = getenv("SPRING_MIPMAP_SYNC");
-		return (e != nullptr) ? std::atoi(e) : 0;
-	}();
-	static const bool logCount = (getenv("SPRING_MIPMAP_STATS") != nullptr);
-	static std::atomic<uint32_t> buildCount = {0};
-
-	if (syncEvery > 0 || logCount) {
-		const uint32_t n = buildCount.fetch_add(1) + 1;
-
-		if (logCount && (n % 100) == 0)
-			fprintf(stderr, "mipmaps: %u textures built\n", n);
-
-		if (syncEvery > 0 && (n % static_cast<uint32_t>(syncEvery)) == 0)
-			glFinish();
-	}
 }
 
 bool glSpringBlitImages(
