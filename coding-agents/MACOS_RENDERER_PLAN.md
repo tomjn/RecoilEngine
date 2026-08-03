@@ -825,6 +825,29 @@ Nothing here is understood yet. Do not treat a memory ceiling as making engine r
 
 **The test map is now Valles Marineris 2.6.1**, symlinked into `~/dev/spring-testdata/maps/`. `mapname` in a start script is the mapinfo `name` plus its `version`, so `Valles Marineris 2.6.1`, not the archive filename. The autoselect test widget has been removed from the SplinterFaction copy.
 
+**The red artefact is not a pre-Metal4 regression, and the mitigation is only about 94% effective, 2026-08-03**
+
+`off_probe` built against both prefixes and run on each gives output that differs in one line, the version string. Every measured row is identical. So the Metal4 migration changed nothing about the immediate-mode batching bug, and the artefact coming back on pre-Metal4 is not that version being worse.
+
+What the probe actually says about the mitigation the engine ships:
+
+| fix | wrong |
+|---|---|
+| E0 naive, as the engine drew before | 15 of 17 |
+| E6 glFlush before every begin, what the engine does now | **1 of 17** |
+| everything else tried, E1 to E11 | 15 or 16 of 17 |
+
+**So there is a residual.** E6 is far better than anything else and it is not complete. One warm-up count in seventeen still renders wrong, and which one depends on the byte offset a batch lands at inside the immediate-mode buffer. That makes the artefact deterministic for a given piece of content and its preceding draws, and different between runs where the preceding draws differ.
+
+That matches what was seen exactly. In one session the build menu corrupted, stayed static, and the corruption tracked the content as it scrolled. In the next run, same binary, same map, same Mesa, with the build menu opened, nothing. Both are consistent with a 1-in-17 residual rather than with anything having changed.
+
+Two consequences worth holding on to:
+
+- **Do not read a clean run as a fix.** With about a 6% residual, a short session proves very little. Any claim about the artefact needs several runs and the same content on screen.
+- **PR #3169 is still worth having and is honestly described.** It measured 0 of 31 corrupted frames against 11 of 89 stock, which is the improvement this table predicts, not a claim of perfection. The real fix remains LuaOpenGL not using immediate mode.
+
+The probe still does not reproduce the engine's display list case. Rows D0 to D2 are 0 of 17 wrong, so a list replayed among many live immediate-mode batches, which is the case that matters in the engine, is still unmodelled.
+
 **What this costs.** Pinning here gives up every KosmicKrisp fix since 2026-06-16, which is at least 18 commits, and the reported Vulkan version drops from 1.4 to 1.3. Pre-Metal4 is also not perfectly bounded, just far cheaper and able to return memory. It unblocks the port, it does not fix the bug, so the upstream report still matters.
 
 ---
