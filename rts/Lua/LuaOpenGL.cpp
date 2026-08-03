@@ -6169,6 +6169,15 @@ int LuaOpenGL::CreateList(lua_State* L)
 		const int funcRef = luaL_ref(L, LUA_REGISTRYINDEX);
 		const unsigned int index = displayLists.NewDeferredDList(funcRef);
 
+		// TEMP diagnostic, not for merge. Logs at each doubling, so a runaway is
+		// visible in the log rather than only in the memory graph.
+		static unsigned int nextReport = 64;
+		if (displayLists.GetCount() >= nextReport) {
+			LOG("[DeferList] %u lists live (latest index=%u ref=%i args=%i)",
+				displayLists.GetCount(), index, funcRef, args);
+			nextReport *= 2;
+		}
+
 		lua_pushnumber(L, index);
 		return 1;
 	}
@@ -6230,6 +6239,11 @@ int LuaOpenGL::CallList(lua_State* L)
 
 		const int tableIdx = lua_gettop(L);
 		const int numVals = lua_objlen(L, tableIdx);
+
+		// TEMP diagnostic, not for merge
+		static int callCount = 0;
+		if (callCount++ < 40)
+			LOG("[DeferList] call #%i index=%u ref=%i numVals=%i", callCount, listIndex, funcRef, numVals);
 
 		for (int i = 1; i <= numVals; i++)
 			lua_rawgeti(L, tableIdx, i);

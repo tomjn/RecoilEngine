@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <array>
+#include <cstdlib>
 #include <vector>
 #include <string>
 #include <bit>
@@ -551,7 +552,13 @@ void glBeginBatch(GLenum mode)
 	// writing into the same buffer. Issuing them without submitting, which any
 	// state change does, is not enough: measured on Zink over KosmicKrisp the
 	// draws Mesa emits are then byte for byte identical and still come out wrong.
-	if (!globalRendering->supportImmediateModeBatching)
+	// TEMP diagnostic, not for merge. Deferring Lua display lists moves all their
+	// batches onto the live path, so the flush count per frame jumps by whatever
+	// the game's widgets contain. This separates the cost of the flushes from the
+	// cost of re-running the Lua closures.
+	static const bool noBatchFlush = (getenv("SPRING_NO_BATCH_FLUSH") != nullptr);
+
+	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush)
 		glFlush();
 
 	glBegin(mode);
