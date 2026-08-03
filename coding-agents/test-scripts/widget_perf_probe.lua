@@ -38,6 +38,17 @@ local lastReport = nil
 -- handlers refuse writes to new globals.
 local reportProfile
 
+-- Every run has to prove what it measured. One sweep reported a 2.5x win that was
+-- really an empty map with a faction picker over it, because disabling a gadget
+-- had stopped units spawning, and nothing in the log said so. A frame rate with
+-- units=0 beside it is obviously void rather than quietly wrong.
+local function sceneSummary()
+	local units = Spring.GetAllUnits() or {}
+	local vsx, vsy = Spring.GetViewGeometry()
+
+	return string.format("units=%d view=%dx%d", #units, vsx or 0, vsy or 0)
+end
+
 function widget:Initialize()
 	-- Profiler on, overlay off. The overlay is itself a per-frame draw cost and
 	-- would be measuring the measurement.
@@ -53,7 +64,7 @@ function widget:GameFrame(f)
 
 	lockedCam = Spring.GetCameraState()
 	Spring.SendCommands("pause 1")
-	Spring.Echo("[probe] scene frozen at sim frame " .. f)
+	Spring.Echo(string.format("[probe] scene frozen at sim frame %d, %s", f, sceneSummary()))
 end
 
 function widget:DrawScreen()
@@ -74,7 +85,7 @@ function widget:Update()
 		return
 	end
 
-	Spring.Echo(string.format("[probe] fps=%.2f drawframes=%d over %.2fs", drawFrames / dt, drawFrames, dt))
+	Spring.Echo(string.format("[probe] fps=%.2f drawframes=%d over %.2fs %s", drawFrames / dt, drawFrames, dt, sceneSummary()))
 
 	drawFrames = 0
 	lastReport = now

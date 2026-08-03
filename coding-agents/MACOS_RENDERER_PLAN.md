@@ -1185,7 +1185,33 @@ Rows 1, 2, 3 and 5 fit `3.9ms x rendered Mpixel + 7.5ms x window Mpixel on scree
 - `c990c4e301` viewport must match the FBO, not the drawable. **Already satisfied**, differently and better: S6 made `winSize` come from `MacEGL::GetSurfaceSize()` and derives `pixelsPerPoint` from the ratio.
 - `931f677cdd` async PBO readback, downsample and timing knobs. **Not ported.** Its claim is 3x in busy scenes, 41ms sync against 13ms with the PBO, on the strength of the PBO hiding the `glReadPixels` pipeline drain behind a frame of latency. That conflicts with S3's measurement here that `glReadPixels` into a PBO still blocks on this driver, so it buys no run-ahead and costs 0.7ms a frame extra. It also conflicts with the `nopresent,finish` result, which kept the drain and removed only the copy and present for 3%. Both could still be true, since their number is a different scene on June's post-Metal4 Mesa, and the S3 figure was taken on the main menu, which draws almost nothing. **It is one interleaved run to settle, once the knob is ported: `-` against `nopbo`.**
 
-**So the lever is the number of render passes, or making a pass not store and reload the whole attachment.** Two directions, and they are not exclusive:
+**The map is only a fifth of the frame. Empty Mod on the same map runs at 80 fps, 2026-08-04.** Same map, same 3024x1832 drawable, same engine, same driver:
+
+| game | fps | frame | per Mpixel |
+|---|---|---|---|
+| SplinterFaction 0.1.78, frozen | 15.9 | 62.9ms | 11.3ms |
+| Empty Mod | 80 | 12.5ms | 2.3ms |
+
+The control run is formally void on focus, 5 of 45 polls, but the losses start at poll 27 and cycles 1 to 4 precede them at 80.0, 82.0, 85.1 and 80.9 fps. The worst cycle in the whole run is 64. `coding-agents/test-scripts/empty-mod-valles.txt` is Empty Mod on the SplinterFaction script's map, and `run-capped.sh` now takes `SCRIPT=` so a run can be pointed at it.
+
+**Empty Mod is a floor, not a fair control.** It has no units and no LuaUI, so it cannot separate "the game's interface and effects" from "drawing units". What it does show is that the map costs 12.5ms of the 62.9ms, and that the renderer's own floor is 2.3ms a Mpixel rather than the 11.3ms attributed to it above. **The 11.3ms figure is SplinterFaction's scene, not this renderer's.**
+
+**The detail that narrows it: the frozen SplinterFaction scene has `units=1`.** One commander. So the missing 50ms is not unit count, and it is not the map. It is the game's LuaUI, shaders, model materials and per-frame effects with a single unit on screen. If render passes are the mechanism, roughly 190 of the inferred 200 a frame come from there.
+
+**A start script cannot narrow it further.** `script.tdf` sets the game, map, teams, start position type and modoptions, which is all `splinterfaction-fixed-start.txt` and `empty-mod-valles.txt` do. It cannot disable a game's LuaUI or its gadgets. Only the console action `LuaUI` can (`UnsyncedGameCommands.cpp:2933`), and there is no config key for it.
+
+**So the bisect that would settle it**, and it is one run: the probe freezes the scene, then issues `luaui disable`. That removes the probe with it, but the freeze survives, because pause is engine state and nothing is left to move the camera, and `SPRING_DIAG_CELLS` logs the frame rate from the engine rather than from Lua. Running Metal Factions or MCL on the same map is the other half, a real game with real units against which SplinterFaction can be judged.
+
+**The engine-side feature sweep was negative, which agrees with that.** `AllowDeferredMapRendering = 0`, `AllowDeferredModelRendering = 0`, `CubeTexSizeReflection = 128`, `CubeTexGenerateMipMaps = 0` and `Water = 0` together give 17.0 fps against 15.9, which is inside the run-to-run drift. So the cost is in the game's own drawing rather than in engine features it switches on.
+
+**Two traps this sweep walked into, both worth not repeating.**
+
+- **SplinterFaction overrides these config values at runtime.** `gfx_deferred_rendering.lua:306` sets both `AllowDeferred*` keys to 1 and `api_pbr_enabler.lua:72` sets the cubemap to 1024 with mipmaps. That is why the test config kept reappearing with those values. It is a partial override, which is worse than a clean one, because `ModelDrawer.cpp:22` reads at init while `SMFGroundDrawer.cpp:484` is a `static const bool` read on the first draw, after LuaUI has loaded. Comment out those four lines rather than disabling the files, and the deferred widget then takes its own self-disable path.
+- **Disabling `api_pbr_enabler.lua` outright stops units spawning and raises the faction picker.** The first sweep attempt reported 40.4 fps, a 2.5x win, which was an empty map with a menu over it. Nothing in the log said so and only the user's eyes caught it. The probe widget now logs `units=N view=WxH` on the freeze line and on every report, so a frame rate measured on the wrong scene is obviously void instead of quietly wrong.
+
+**What this means for the port.** Performance is a content problem, and BAR-family content is explicitly out of scope in section 2b. The honest headline is 80 fps on an empty game at full Retina resolution and 16 fps with SplinterFaction's full content. If anyone wants to pursue it, the next bisect is within the game: LuaUI off separates its interface and effects from its unit materials.
+
+**So if the remaining cost is render passes, they are the game's.** Two directions, and they are not exclusive:
 
 - Engine side: fewer framebuffer switches per frame. Nothing has counted them yet. A counter on `glBindFramebuffer` logged per cell is the cheap next step and it names the engine's own switches, which is what a fix would have to act on.
 - Driver side: a tiler should clear or discard rather than load and store when the previous contents are not needed. If Zink or KosmicKrisp is conservatively using load and store actions on every pass, that is a driver fix with a very large payoff, and it is the same shape of finding as the memory leak. Worth checking against Metal's `MTLLoadAction` and `MTLStoreAction` before reporting anything.
