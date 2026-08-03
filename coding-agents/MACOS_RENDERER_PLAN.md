@@ -1138,7 +1138,32 @@ Rows 1, 2, 3 and 5 fit `3.9ms x rendered Mpixel + 7.5ms x window Mpixel on scree
 
 **That leaves about 30ms a frame that is not our rendering, not our present and not our CPU.** The same 1.38 Mpixel of GL work costs 15.4ms with a physically small window and 46ms with a full size one, present removed in the slower case. Nothing inside the engine's own frame differs between those two.
 
-**The hypothesis, not established: we are contending with WindowServer.** Its compositing cost scales with the window's area on screen and it keeps compositing whether or not we present, which would explain why removing our present changes nothing, and why row 4, where the compositor also has to magnify, is worse than its render size predicts. Three ways to test it, none tried. A 1x external display, so no scaling is needed anywhere. Sampling WindowServer's own GPU time with Metal System Trace. Or comparing an occluded window, remembering that macOS throttles occluded apps and that confound is what voided earlier runs.
+**Settled: the cost appears whenever the frame is not displayed 1:1, and it is about 38ms flat, 2026-08-04.** The discriminating run was render scale 0.5 with the small window, so 0.35 Mpixel rendered into a 1512x916 drawable at the display's own scale. The screen-area model predicted 85 fps. It measured **25.2 fps**, which is the same as the 24.9 of the row that fitted nothing. Sorting all six runs by whether the rendered image reaches the display 1:1:
+
+| # | render | drawable | window on screen | 1:1 | fps | frame |
+|---|---|---|---|---|---|---|
+| 1 | 5.54 | 5.54 | 5.54 | yes | 15.9 | 62.9ms |
+| 2 | 1.38 | 1.38 | 1.38 | yes | 65.0 | 15.4ms |
+| 3 | 1.38 | 1.38 | 5.54 | no | 21.3 | 47.0ms |
+| 4 | 0.35 | 0.35 | 1.38 | no | 24.9 | 40.2ms |
+| 5 | 1.38 | 5.54 | 5.54 | no | 21.5 | 46.5ms |
+| 6 | 0.35 | 1.38 | 1.38 | no | 25.2 | 39.7ms |
+
+- **1:1, rows 1 and 2**: 11.3ms a Mpixel, no fixed term.
+- **not 1:1, rows 3 to 6 plus the 0.75 run**: about 38ms flat plus 4.7ms a Mpixel rendered.
+
+**The window's area on screen does not enter it.** Rows 4 and 6 have a quarter the screen area of rows 3 and 5 and sit on the same line. That is what kills the WindowServer contention hypothesis below.
+
+**And it is not about who does the scaling.** Rows 3 and 4 break 1:1 in the compositor, by dropping `contentsScale` with `MacHiDPIRendering = 0`. Rows 5 and 6 break it in our own present shader, by shrinking the pbuffer with `MacRenderScale` while the layer stays at the display's scale. Two unrelated code paths, the same 38ms. So the trigger is the final mapping to the display not being 1:1.
+
+**Consequences.**
+
+- **Render scaling is a dead end on this present path.** Every route to fewer pixels breaks 1:1 and pays the 38ms, which is why none of them delivered the 4x. As the render size goes to zero the frame cost goes to 38ms, hence the 24 fps ceiling. `MacRenderScale` is still a net win at the default window, 62.9ms to 46.5ms, because the render saving exceeds the penalty, but the penalty eats most of it.
+- **The 4x is real and only available at 1:1**, which means a physically smaller window. Row 2 is the same engine doing the same work at 65 fps.
+- **The target is therefore the 11.3ms a Mpixel at 1:1**, which is the render pass cost above, and the 38ms is a separate penalty that only appears if you try to avoid it.
+- **The 38ms is worth attributing and reporting.** It is a flat per-frame cost for presenting a non-1:1 layer on this stack, it shows up through two different paths, and nothing in the engine's own frame explains it. Metal System Trace is the tool. A 1x external display would confirm it from the other direction, since nothing anywhere would need scaling.
+
+**Superseded hypothesis, kept because it was wrong in an instructive way: contention with WindowServer.** Its compositing cost scales with the window's area on screen and it keeps compositing whether or not we present, which would explain why removing our present changes nothing, and why row 4, where the compositor also has to magnify, is worse than its render size predicts. Three ways to test it, none tried. A 1x external display, so no scaling is needed anywhere. Sampling WindowServer's own GPU time with Metal System Trace. Or comparing an occluded window, remembering that macOS throttles occluded apps and that confound is what voided earlier runs.
 
 **`MacRenderScale` is fully characterised, and there is a 41.6ms floor.** Three frozen focused runs at the default 1512x916 point window:
 
