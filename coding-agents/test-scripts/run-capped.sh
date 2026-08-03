@@ -22,7 +22,7 @@ LAUNCHER=${LAUNCHER:-./run-macos.sh}
 # kill above this many kilobytes of resident memory
 # 16 GB of physical RAM on this machine, usually with a colima VM alongside, so
 # the headroom is much smaller than the total suggests
-MAX_RSS_KB=${MAX_RSS_KB:-3145728}   # 3 GiB
+MAX_RSS_KB=${MAX_RSS_KB:-3145728}   # 3 GiB of ps RSS
 POLL_SECONDS=2
 
 cd "$BUILD" || exit 1
@@ -38,13 +38,17 @@ ELAPSED=0
 PEAK_KB=0
 
 while kill -0 "$PID" 2>/dev/null; do
+	# Cap on ps RSS, which is known to behave. Log the others beside it: RSS
+	# ignores IOAccelerator entirely, and top's MEM counts reserved GPU address
+	# space, reporting 9.6 GiB six seconds into a load on a 16 GB machine. Which
+	# of these tracks real pressure is an open question, so record all three.
 	RSS_KB=$(ps -o rss= -p "$PID" 2>/dev/null | tr -d ' ')
 	if [ -n "$RSS_KB" ]; then
 		[ "$RSS_KB" -gt "$PEAK_KB" ] && PEAK_KB=$RSS_KB
 
-		# the series, not just the peak. A peak cannot tell a leak from a cache
-		# that fills and then plateaus, and those need different fixes.
-		echo "$ELAPSED $((RSS_KB / 1024))" >> "$LOGFILE.rss"
+		TOPMEM=$(top -l 1 -pid "$PID" -stats mem 2>/dev/null | tail -1 | tr -d ' ')
+		FOOT=$(footprint -p "$PID" 2>/dev/null | awk '/phys_footprint:/ {print $2 $3; exit}')
+		echo "$ELAPSED rss=$((RSS_KB / 1024))M top=${TOPMEM:-?} foot=${FOOT:-?}" >> "$LOGFILE.mem"
 		if [ "$RSS_KB" -gt "$MAX_RSS_KB" ]; then
 			echo "MEMORY CEILING HIT at $((RSS_KB / 1024)) MiB after ${ELAPSED}s, killing"
 			KILLED_FOR_MEMORY=1
@@ -68,7 +72,7 @@ if pgrep -f '\./spring' > /dev/null; then
 	sleep 1
 fi
 
-echo "peak resident $((PEAK_KB / 1024)) MiB over ${ELAPSED}s"
+echo "peak rss $((PEAK_KB / 1024)) MiB over ${ELAPSED}s"
 if [ "$KILLED_FOR_MEMORY" = 1 ]; then
 	echo "RESULT: killed for memory, do not trust anything this run produced"
 	exit 2
