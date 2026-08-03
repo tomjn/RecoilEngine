@@ -57,6 +57,13 @@ public:
 	void SetGLTimeStamp(uint32_t queryIdx) const;
 	uint64_t CalcGLDeltaTime(uint32_t queryIdx0, uint32_t queryIdx1) const;
 
+	// TEMP diagnostic, not for merge. The previous frame's GPU time in
+	// milliseconds, or a negative number when it is not available yet. Separate
+	// from CalcGLDeltaTime because that one busy-waits for the result, which
+	// never arrives for a query that has not been issued, and SwapBuffers runs
+	// during loading before CGame::Draw stamps anything.
+	double PeekGLFrameMillis() const;
+
 	void MakeCurrentContext(bool clear) const;
 	bool HasGLContext() const;
 

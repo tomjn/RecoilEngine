@@ -17,6 +17,7 @@
 #include "Rendering/Textures/TextureFormat.h"
 #include "Rendering/GL/VBO.h"
 #include "Rendering/GL/TexBind.h"
+#include "Rendering/GL/DiagSwitches.h"
 #include "System/Log/ILog.h"
 #include "System/Exceptions.h"
 #include "System/StringUtil.h"
@@ -557,9 +558,9 @@ void glBeginBatch(GLenum mode)
 	//
 	// TEMP diagnostic, not for merge. SPRING_BATCH_FLUSH=1 brings the old flush
 	// back so the two can be compared, and SPRING_NO_BATCH_FLUSH=1 suppresses it
-	// even then.
-	static const bool noBatchFlush = (getenv("SPRING_NO_BATCH_FLUSH") != nullptr);
-	static const bool wantFlush    = (getenv("SPRING_BATCH_FLUSH") != nullptr);
+	// even then. Both are read per frame so a schedule can interleave them.
+	const bool noBatchFlush = DiagSwitches::On(DiagSwitches::NO_BATCH_FLUSH);
+	const bool wantFlush    = DiagSwitches::On(DiagSwitches::BATCH_FLUSH);
 
 	if (!globalRendering->supportImmediateModeBatching && wantFlush && !noBatchFlush)
 		glFlush();

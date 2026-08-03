@@ -11,6 +11,7 @@
 
 #include "GlobalRendering.h"
 #include "Rendering/GL/FramePhaseDump.h"
+#include "Rendering/GL/DiagSwitches.h"
 #include "GlobalRenderingInfo.h"
 #include "Rendering/VerticalSync.h"
 #include "Rendering/GL/StreamBuffer.h"
@@ -823,16 +824,14 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			// that issue no GL of their own, so the suspicion is per-frame rather
 			// than per-asset. Skipping the present leaves a black window and
 			// answers whether the readback is the source.
-			static const bool noPresent = (getenv("SPRING_NO_PRESENT") != nullptr);
-			if (!noPresent)
+			if (!DiagSwitches::On(DiagSwitches::NO_PRESENT))
 				MacGLPresent::SwapBuffers();
 
 			// TEMP diagnostic, not for merge. A standalone draw loop on this
 			// driver grows without bound with no per-frame synchronisation and is
 			// flat with one glFinish per frame. Test whether the same bounds the
 			// engine, whose only sync today is the present readback.
-			static const bool frameFinish = (getenv("SPRING_FRAME_FINISH") != nullptr);
-			if (frameFinish)
+			if (DiagSwitches::On(DiagSwitches::FRAME_FINISH))
 				glFinish();
 
 			// TEMP diagnostic, not for merge. The in-game readout gives 13 fps at
@@ -865,8 +864,7 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			// rate. The load screen has almost nothing to draw and can spin at
 			// thousands of frames per second, which at a few MB of driver
 			// allocation per frame is the GB/s of growth being chased.
-			static const bool throttle = (getenv("SPRING_FRAME_THROTTLE") != nullptr);
-			if (throttle) {
+			if (DiagSwitches::On(DiagSwitches::FRAME_THROTTLE)) {
 				using clock = std::chrono::steady_clock;
 				static clock::time_point last = clock::now();
 				const auto target = std::chrono::microseconds(16667);
@@ -878,6 +876,12 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 		#else
 			SDL_GL_SwapWindow(sdlWindow);
 		#endif
+
+		// TEMP diagnostic, not for merge. A frame boundary is the only safe place
+		// to change a switch, so the schedule advances here. The GPU frame time
+		// goes with it, because SwapBuffers being 94% of wall clock only means
+		// something once the GPU's own time for the frame is known beside it.
+		DiagSwitches::FramePresented(PeekGLFrameMillis());
 
 		#ifdef _WIN32
 			if (forceDWMFlush == 2){
@@ -930,6 +934,35 @@ uint64_t CGlobalRendering::CalcGLDeltaTime(uint32_t queryIdx0, uint32_t queryIdx
 	return (t1 - t0);
 }
 
+
+double CGlobalRendering::PeekGLFrameMillis() const
+{
+	if (!GLAD_GL_ARB_timer_query)
+		return -1.0;
+
+	const uint32_t queryBase = NUM_OPENGL_TIMER_QUERIES * (1 - (drawFrame & 1));
+	const uint32_t q0 = glTimerQueries[queryBase + FRAME_REF_TIME_QUERY_IDX];
+	const uint32_t q1 = glTimerQueries[queryBase + FRAME_END_TIME_QUERY_IDX];
+
+	// A name from glGenQueries is not a query object until something writes to
+	// it, so this is GL_INVALID_OPERATION for every frame before the first
+	// CGame::Draw. Checked once and dropped rather than waited on.
+	GLint available = 0;
+	glGetQueryObjectiv(q1, GL_QUERY_RESULT_AVAILABLE, &available);
+
+	if (glGetError() != GL_NO_ERROR || !available)
+		return -1.0;
+
+	GLuint64 t0 = 0;
+	GLuint64 t1 = 0;
+	glGetQueryObjectui64v(q0, GL_QUERY_RESULT, &t0);
+	glGetQueryObjectui64v(q1, GL_QUERY_RESULT, &t1);
+
+	if (glGetError() != GL_NO_ERROR || t1 < t0)
+		return -1.0;
+
+	return (t1 - t0) * 1.0e-6;
+}
 
 void CGlobalRendering::CheckGLExtensions()
 {

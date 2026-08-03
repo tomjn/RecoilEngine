@@ -58,6 +58,7 @@
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/TexBind.h"
+#include "Rendering/GL/DiagSwitches.h"
 #include "Rendering/Models/3DModelMisc.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
 #include "Rendering/Shaders/Shader.h"
@@ -268,8 +269,10 @@ static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 	// Measured 3 of 3 clean against 3 of 3 corrupt for the baseline, interleaved,
 	// watching the load screen. off_probe says uniform arity alone is not enough,
 	// 15 of 17 wrong, so the probe does not model this path and the engine is what
-	// counts. SPRING_BATCH_NARROW=1 restores the old narrow vertices.
-	static const bool narrow = (getenv("SPRING_BATCH_NARROW") != nullptr);
+	// counts. SPRING_BATCH_NARROW=1 restores the old narrow vertices. Read per
+	// vertex from a plain global so a schedule can interleave the two sides in one
+	// run, which costs one masked load on a path that already does a branch.
+	const bool narrow = DiagSwitches::On(DiagSwitches::BATCH_NARROW);
 
 	// Gated on the measured capability, the same way the flush is, so a driver
 	// that renders batches correctly pays nothing. Widening every vertex to four

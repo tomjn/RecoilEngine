@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/DiagSwitches.h"
 #include "Rendering/GlobalRendering.h"
 #include "System/Log/ILog.h"
 
@@ -65,8 +66,15 @@ inline void DumpFramePhase(const char* label, int everyNth = 120)
 	if (outDir == nullptr)
 		outDir = "/tmp";
 
+	// Tag the cell into the name when a schedule is running, so an interleaved
+	// run's frames can be scored per side instead of pooled.
+	const char* cell = DiagSwitches::CellName();
+
 	char path[1024];
-	snprintf(path, sizeof(path), "%s/frame_%06u_%s.ppm", outDir, frame, label);
+	if (cell != nullptr)
+		snprintf(path, sizeof(path), "%s/frame_%06u_%s_cell-%s.ppm", outDir, frame, label, cell);
+	else
+		snprintf(path, sizeof(path), "%s/frame_%06u_%s.ppm", outDir, frame, label);
 
 	FILE* f = fopen(path, "wb");
 	if (f == nullptr)
