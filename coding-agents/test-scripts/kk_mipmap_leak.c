@@ -29,7 +29,12 @@
 //   EGL_PLATFORM=surfaceless MESA_LOADER_DRIVER_OVERRIDE=zink \
 //   GALLIUM_DRIVER=zink LIBGL_DRIVERS_PATH=$MESA_PREFIX/lib \
 //   VK_DRIVER_FILES=$MESA_PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.aarch64.json \
+//   MESA_GL_VERSION_OVERRIDE=4.6 MESA_GLSL_VERSION_OVERRIDE=460 \
 //   ./kk_mipmap_leak 100
+//
+// The two overrides are needed or eglMakeCurrent fails and this prints
+// "makeCurrent failed" and stops. Without them zink here advertises GL 2.1 and
+// refuses the 3.3 core context.
 //
 // Start at 100. That is enough to show the problem, and a bigger count is not
 // safe to leave running.
