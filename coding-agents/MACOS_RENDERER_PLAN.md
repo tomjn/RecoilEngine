@@ -763,7 +763,7 @@ The reason is the same every time. One batch state holds thousands of render pas
 
 Numbers worth keeping. A load makes 102000 Metal command buffers in 12 seconds over 40000 submits, 68177 render passes against 33823 compute, with never more than about 660 command buffers live. Only 500 textures go through `RecoilBuildMipmaps`, which is why syncing that path cannot help. Zink's own throttle never engages at all, since live batch states peak at 126 to 229 against its threshold of 5000.
 
-The report draft is in `coding-agents/upstream-kosmickrisp-memory-report.md`, including where it should be filed and why.
+Filed upstream as <https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15998>. The issue text is `coding-agents/upstream-kosmickrisp-issue.md`, the reproducer attached to it is `coding-agents/test-scripts/kk_mipmap_leak.c`, and `coding-agents/upstream-kosmickrisp-memory-report.md` keeps the filing rationale and the dead ends. The tracker is behind Anubis, so read and reply to it by hand.
 
 ---
 

@@ -1,6 +1,10 @@
 # Upstream report: kosmickrisp memory regression from Metal4 command encoding
 
-Working notes. The text actually meant for the tracker is `upstream-kosmickrisp-issue.md`, which follows Mesa's own bug report template. This file keeps the filing rationale and the dead ends, which do not belong in the issue.
+**Filed as <https://gitlab.freedesktop.org/mesa/mesa/-/work_items/15998>.**
+
+Working notes. The text that went to the tracker is `upstream-kosmickrisp-issue.md`, which follows Mesa's own bug report template, and the reproducer is `test-scripts/kk_mipmap_leak.c`. This file keeps the filing rationale and the dead ends, which do not belong in the issue.
+
+The tracker sits behind Anubis, which is there to block automated traffic, so read and reply to it yourself rather than having an agent fetch it.
 
 ## Summary
 
