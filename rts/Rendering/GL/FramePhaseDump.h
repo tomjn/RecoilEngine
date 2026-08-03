@@ -41,6 +41,13 @@ inline void DumpFramePhase(const char* label, int everyNth = 120)
 	// comparing them says nothing.
 	const unsigned int frame = globalRendering->drawFrame;
 
+	// SPRING_PHASE_DUMP_EVERY raises the sample rate without a rebuild. The
+	// artefact varies frame to frame, so a run needs enough frames to compare
+	// as a distribution rather than as a single peak.
+	static const char* everyEnv = getenv("SPRING_PHASE_DUMP_EVERY");
+	if (everyEnv != nullptr && atoi(everyEnv) > 0)
+		everyNth = atoi(everyEnv);
+
 	if ((frame % everyNth) != 0)
 		return;
 
