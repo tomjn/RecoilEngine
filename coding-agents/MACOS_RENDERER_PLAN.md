@@ -1122,7 +1122,25 @@ So turning it off gives 1.34x, not the 4x the pixel count predicts. The last row
 
 **The native-scale rows fit better than the first write-up of them claimed.** 11.4ms a Mpixel through the origin, no fixed term. But note the confound that the fourth row exposes: those two rows changed the window's size on screen and the render size together, so on their own they could not attribute the 4x to either. The non-native rows are what rule the screen-area explanation out, because shrinking the window there bought only 6.8ms.
 
-**What this says to do instead.** Keep `contentsScale` at the display's, so the layer stays native and the 38ms never appears, and shrink the pbuffer alone. The present already samples the IOSurface through a linear filter into a full size drawable, so an undersized IOSurface upscales for free there. That is ExaDev's `SPRING_DOWNSAMPLE_READBACK` shape rather than their `SPRING_MAC_NO_RETINA` one, and at native scale it should give the 11.4ms a Mpixel win: roughly 55 to 60 fps at the default window. It needs the pbuffer size decoupled from `MacMetalPresent_GetDrawableSize`, which S6 deliberately tied together, so it is a real change to the present sizing rather than a config flip.
+**Shrinking the pbuffer alone does not help either, and that is the finding that breaks the model, 2026-08-03.** `MacRenderScale` was added to test it: the layer keeps the display's `contentsScale` and only the pbuffer shrinks, so the present's linear sampler does the upscale into a full size drawable. Verified working from the log, `MacRenderScale draws 1512x916 into a 3024x1832 drawable`, no GL errors. It gives **21.5 fps, against 21.3 for `MacHiDPIRendering = 0` and 15.9 for the default.** So both routes to fewer rendered pixels land in the same place, and neither is the 4x that the native-scale pair predicted.
+
+| render | drawable | window on screen | fps | frame |
+|---|---|---|---|---|
+| 5.54 | 5.54 | 5.54 | 15.9 | 62.9ms |
+| 1.38 | 1.38 | 1.38 | 65.0 | 15.4ms |
+| 1.38 | 1.38 | 5.54 | 21.3 | 47.0ms |
+| 0.35 | 0.35 | 1.38 | 24.9 | 40.2ms |
+| 1.38 | 5.54 | 5.54 | 21.5 | 46.5ms |
+
+Rows 1, 2, 3 and 5 fit `3.9ms x rendered Mpixel + 7.5ms x window Mpixel on screen`. **Row 4 does not fit anything.** It renders four times less than row 2 at the same screen area and is 2.6x slower. No linear model covers all five.
+
+**And the present is not where the missing time is, tested twice.** At render scale 0.5, `-` against `nopresent,finish` gives 21.64 against 21.86 fps, faster in 2 of 8 cycles, p = 0.29. So removing the readback and the present entirely changes nothing, the same answer as the 3% at full resolution.
+
+**That leaves about 30ms a frame that is not our rendering, not our present and not our CPU.** The same 1.38 Mpixel of GL work costs 15.4ms with a physically small window and 46ms with a full size one, present removed in the slower case. Nothing inside the engine's own frame differs between those two.
+
+**The hypothesis, not established: we are contending with WindowServer.** Its compositing cost scales with the window's area on screen and it keeps compositing whether or not we present, which would explain why removing our present changes nothing, and why row 4, where the compositor also has to magnify, is worse than its render size predicts. Three ways to test it, none tried. A 1x external display, so no scaling is needed anywhere. Sampling WindowServer's own GPU time with Metal System Trace. Or comparing an occluded window, remembering that macOS throttles occluded apps and that confound is what voided earlier runs.
+
+**Practical consequence for `MacRenderScale`.** Under the fit, the screen-area term is 41ms of the 46ms frame at the default window, so even 0.25 would only reach about 23 fps. **The knob is capped at roughly 1.5x however far it is pushed**, and 0.75 buys about 1.15x for visibly softer glyphs. It stays in as a measurement tool and an honest small win, not as the answer. A per-target scale, world reduced and UI at full, would fix the text cost but needs separate render targets.
 
 **What ExaDev already has, checked 2026-08-03.** Two performance commits on `macos-layer`, and most of it is already here.
 
