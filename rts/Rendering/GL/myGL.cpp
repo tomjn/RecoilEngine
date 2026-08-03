@@ -549,47 +549,22 @@ bool glSpringBlitImages(
 
 void glBeginBatch(GLenum mode)
 {
-	// the pending batches have to reach the GPU before the next one starts
-	// writing into the same buffer. Issuing them without submitting, which any
-	// state change does, is not enough: measured on Zink over KosmicKrisp the
-	// draws Mesa emits are then byte for byte identical and still come out wrong.
-	// TEMP diagnostic, not for merge. Deferring Lua display lists moves all their
-	// batches onto the live path, so the flush count per frame jumps by whatever
-	// the game's widgets contain. This separates the cost of the flushes from the
-	// cost of re-running the Lua closures.
+	// The mitigation for the immediate-mode batching defect is a uniform vertex
+	// arity, applied in LuaOpenGL, which costs no synchronisation. It replaced a
+	// glFlush here: measured interleaved on the load screen, three of three runs
+	// corrupt without it and three of three clean with it, and the difference is
+	// obvious rather than marginal.
+	//
+	// TEMP diagnostic, not for merge. SPRING_BATCH_FLUSH=1 brings the old flush
+	// back so the two can be compared, and SPRING_NO_BATCH_FLUSH=1 suppresses it
+	// even then.
 	static const bool noBatchFlush = (getenv("SPRING_NO_BATCH_FLUSH") != nullptr);
+	static const bool wantFlush    = (getenv("SPRING_BATCH_FLUSH") != nullptr);
 
-	// TEMP diagnostic, not for merge. off_probe finds a rule that is complete
-	// where the flush is not: 0 of 17 warm-up counts wrong against 1 of 17. It
-	// needs two things together, the full attribute set emitted once after every
-	// glBegin, and a vertex arity that never varies. Either alone is no better
-	// than drawing naively. The arity half is handled in LuaOpenGL, which now
-	// always emits glVertex4f. This is the other half, and it should also be far
-	// cheaper than a glFlush per batch, which serialises.
-	static const bool normalise = (getenv("SPRING_BATCH_NORMALISE") != nullptr);
-	static const bool arityOnly = (getenv("SPRING_BATCH_ARITY") != nullptr);
-
-	if (!globalRendering->supportImmediateModeBatching && !noBatchFlush && !normalise && !arityOnly)
+	if (!globalRendering->supportImmediateModeBatching && wantFlush && !noBatchFlush)
 		glFlush();
 
-	// glGet is not legal between glBegin and glEnd, so read the current values
-	// first. Re-emitting them is a no-op for what gets drawn, and it is the
-	// presence of the attributes rather than their values that fixes the format.
-	GLfloat col[4], txc[4], nrm[3];
-
-	if (normalise && !globalRendering->supportImmediateModeBatching) {
-		glGetFloatv(GL_CURRENT_COLOR, col);
-		glGetFloatv(GL_CURRENT_TEXTURE_COORDS, txc);
-		glGetFloatv(GL_CURRENT_NORMAL, nrm);
-	}
-
 	glBegin(mode);
-
-	if (normalise && !globalRendering->supportImmediateModeBatching) {
-		glColor4f(col[0], col[1], col[2], col[3]);
-		glTexCoord2f(txc[0], txc[1]);
-		glNormal3f(nrm[0], nrm[1], nrm[2]);
-	}
 }
 
 void ClearScreen()

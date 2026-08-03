@@ -265,12 +265,11 @@ static inline void glVertexNarrow(float x, float y, float z, float w, int arity)
 // which already invalidated one negative control.
 static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 {
-	// SPRING_BATCH_ARITY is the arity half on its own. off_probe says that is
-	// not enough, 15 of 17 against 0 of 17 for both halves, but it is much the
-	// cheaper half so it is worth confirming against the engine rather than
-	// assuming the probe models it.
-	static const bool normalise = (getenv("SPRING_BATCH_NORMALISE") != nullptr);
-	static const bool arityOnly = (getenv("SPRING_BATCH_ARITY") != nullptr);
+	// Measured 3 of 3 clean against 3 of 3 corrupt for the baseline, interleaved,
+	// watching the load screen. off_probe says uniform arity alone is not enough,
+	// 15 of 17 wrong, so the probe does not model this path and the engine is what
+	// counts. SPRING_BATCH_NARROW=1 restores the old narrow vertices.
+	static const bool narrow = (getenv("SPRING_BATCH_NARROW") != nullptr);
 
 	// Gated on the measured capability, the same way the flush is, so a driver
 	// that renders batches correctly pays nothing. Widening every vertex to four
@@ -279,7 +278,7 @@ static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 	if (globalRendering->supportImmediateModeBatching)
 		return glVertexNarrow(x, y, z, w, arity);
 
-	if (normalise || arityOnly) {
+	if (!narrow) {
 		glVertex4f(x, y, z, w);
 		return;
 	}
