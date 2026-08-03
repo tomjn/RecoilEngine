@@ -3,7 +3,9 @@
 #include <string>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
 #include <cmath>
+#include <thread>
 
 #include <SDL.h>
 
@@ -815,7 +817,40 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 		#endif
 		
 		#ifdef SPRING_USE_MAC_EGL
-			MacGLPresent::SwapBuffers();
+			// TEMP diagnostic, not for merge. The present reads the whole
+			// framebuffer back into an IOSurface every frame. Memory grows about
+			// 5 GiB/s on this driver and the growth continues through load phases
+			// that issue no GL of their own, so the suspicion is per-frame rather
+			// than per-asset. Skipping the present leaves a black window and
+			// answers whether the readback is the source.
+			static const bool noPresent = (getenv("SPRING_NO_PRESENT") != nullptr);
+			if (!noPresent)
+				MacGLPresent::SwapBuffers();
+
+			// TEMP diagnostic, not for merge. A standalone draw loop on this
+			// driver grows without bound with no per-frame synchronisation and is
+			// flat with one glFinish per frame. Test whether the same bounds the
+			// engine, whose only sync today is the present readback.
+			static const bool frameFinish = (getenv("SPRING_FRAME_FINISH") != nullptr);
+			if (frameFinish)
+				glFinish();
+
+			// TEMP diagnostic, not for merge. VSync goes through
+			// SDL_GL_SetSwapInterval, which does nothing here because SDL owns
+			// neither the context nor the present, so nothing throttles the frame
+			// rate. The load screen has almost nothing to draw and can spin at
+			// thousands of frames per second, which at a few MB of driver
+			// allocation per frame is the GB/s of growth being chased.
+			static const bool throttle = (getenv("SPRING_FRAME_THROTTLE") != nullptr);
+			if (throttle) {
+				using clock = std::chrono::steady_clock;
+				static clock::time_point last = clock::now();
+				const auto target = std::chrono::microseconds(16667);
+				const auto elapsed = clock::now() - last;
+				if (elapsed < target)
+					std::this_thread::sleep_for(target - elapsed);
+				last = clock::now();
+			}
 		#else
 			SDL_GL_SwapWindow(sdlWindow);
 		#endif
