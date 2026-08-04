@@ -24,10 +24,9 @@
 
 namespace DiagSwitches {
 	enum Switch {
-		BATCH_FLUSH = 0,   // SPRING_BATCH_FLUSH, glFlush before every glBegin
-		BATCH_NARROW,      // SPRING_BATCH_NARROW, the old varying vertex arity
+		BATCH_NARROW = 0,  // SPRING_BATCH_NARROW, the old varying vertex arity
 		BATCH_NORMALISE,   // SPRING_BATCH_NORMALISE, restate the attribute set after every glBegin
-		NO_BATCH_FLUSH,    // SPRING_NO_BATCH_FLUSH, no mitigation at all
+		NO_BATCH_FLUSH,    // SPRING_NO_BATCH_FLUSH, turn the default per-batch flush off
 		NO_PRESENT,        // SPRING_NO_PRESENT, skip the readback and present
 		FRAME_FINISH,      // SPRING_FRAME_FINISH, glFinish once per frame
 		FRAME_THROTTLE,    // SPRING_FRAME_THROTTLE, sleep to 60 fps
