@@ -34,16 +34,16 @@ echo "==> staging $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT/lib"
 
-cp "$BUILD/spring" "$OUT/spring"
+cp "$BUILD/spring" "$OUT/spring-bin"
 
 # The build links whichever Mesa prefix it was compiled against, which is the
 # post-Metal4 one. Left alone, dylibbundler follows that and pulls the leaking
 # gallium into the archive, silently undoing the whole reason for the pin.
 # Point it at the bundled copy before anything else runs.
-OLD_EGL=$(otool -L "$OUT/spring" | awk '/libEGL\.1\.dylib/ {print $1; exit}')
+OLD_EGL=$(otool -L "$OUT/spring-bin" | awk '/libEGL\.1\.dylib/ {print $1; exit}')
 if [ -n "$OLD_EGL" ]; then
 	echo "==> repointing libEGL from $OLD_EGL"
-	install_name_tool -change "$OLD_EGL" "@executable_path/lib/libEGL.1.dylib" "$OUT/spring"
+	install_name_tool -change "$OLD_EGL" "@executable_path/lib/libEGL.1.dylib" "$OUT/spring-bin"
 fi
 
 # -L so the versioned target is copied rather than a symlink into Homebrew
@@ -93,7 +93,7 @@ done
 
 echo "==> bundling dependencies"
 dylibbundler --overwrite-files --bundle-deps \
-	--fix-file "$OUT/spring" \
+	--fix-file "$OUT/spring-bin" \
 	--fix-file "$OUT/lib/libEGL.1.dylib" \
 	--fix-file "$OUT/lib"/libgallium-*.dylib \
 	--fix-file "$OUT/lib/libvulkan_kosmickrisp.dylib" \
@@ -109,18 +109,25 @@ dylibbundler --overwrite-files --bundle-deps \
 # dylibbundler adds this rpath once per dependency it rewrites, and dyld refuses
 # to start a process carrying a duplicate LC_RPATH. Strip every copy, then add
 # exactly one.
-while otool -l "$OUT/spring" | grep -q "@executable_path/lib"; do
-	install_name_tool -delete_rpath "@executable_path/lib/" "$OUT/spring" 2>/dev/null \
-		|| install_name_tool -delete_rpath "@executable_path/lib" "$OUT/spring" 2>/dev/null \
+while otool -l "$OUT/spring-bin" | grep -q "@executable_path/lib"; do
+	install_name_tool -delete_rpath "@executable_path/lib/" "$OUT/spring-bin" 2>/dev/null \
+		|| install_name_tool -delete_rpath "@executable_path/lib" "$OUT/spring-bin" 2>/dev/null \
 		|| break
 done
-install_name_tool -add_rpath "@executable_path/lib" "$OUT/spring"
-codesign --force -s - "$OUT/spring" 2>/dev/null || true
+install_name_tool -add_rpath "@executable_path/lib" "$OUT/spring-bin"
+codesign --force -s - "$OUT/spring-bin" 2>/dev/null || true
 
-cat > "$OUT/spring.sh" <<'SH'
+cat > "$OUT/spring" <<'SH'
 #!/bin/sh
-# Portable launcher. Everything is resolved relative to this file, so the
-# archive can be extracted anywhere.
+# The engine. This is a launcher, and the binary sits beside it as spring-bin.
+#
+# It has to be this way round because a lobby runs the file called "spring".
+# Mesa picks its driver entirely through the environment, and none of
+# MESA_LOADER_DRIVER_OVERRIDE, GALLIUM_DRIVER or VK_DRIVER_FILES can be baked
+# into a Mach-O, so a bare binary gets no GL context and no useful error.
+#
+# Everything resolves relative to this file, so the archive runs from wherever
+# it was extracted.
 DIR=$(cd "$(dirname "$0")" && pwd)
 
 export EGL_PLATFORM=surfaceless
@@ -135,12 +142,12 @@ export DYLD_LIBRARY_PATH="$DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 export MESA_GL_VERSION_OVERRIDE=4.6
 export MESA_GLSL_VERSION_OVERRIDE=460
 
-exec "$DIR/spring" "$@"
+exec "$DIR/spring-bin" "$@"
 SH
-chmod +x "$OUT/spring.sh"
+chmod +x "$OUT/spring"
 
 echo "==> checking nothing still points outside the archive"
-LEAKS=$( (otool -L "$OUT/spring" "$OUT/lib"/*.dylib || true) \
+LEAKS=$( (otool -L "$OUT/spring-bin" "$OUT/lib"/*.dylib || true) \
 	| grep -v ":$" | grep -E "/opt/homebrew|/Users/" || true)
 if [ -n "$LEAKS" ]; then
 	echo "!! these still reference paths outside the archive:"
@@ -150,3 +157,23 @@ else
 fi
 
 echo "==> $(du -sh "$OUT" | cut -f1) in $OUT"
+
+# Zipped the way pr-downloader expects to find one. It extracts the archive flat
+# into <springdir>/engine/<platform>/<version>/, so the archive must have no
+# wrapping directory of its own: spring, spring-bin, lib and base sit at the top.
+# See CFileSystem::extractEngine.
+VERSION=$("$OUT/spring" --sync-version 2>/dev/null | head -1)
+ZIP=$(dirname "$OUT")/recoil_$(echo "$VERSION" | tr ' /' '__')_macos_arm64.zip
+
+echo "==> zipping as $(basename "$ZIP")"
+rm -f "$ZIP"
+(cd "$OUT" && zip -qr "$ZIP" . -x ".bundle.log")
+
+echo "==> $(du -sh "$ZIP" | cut -f1) in $ZIP"
+# pr-downloader replaces \/:?"<>| with _ before using the version as a directory
+# name, see CFileSystem::EscapeFilename, so the branch slash becomes underscore.
+ESCAPED=$(echo "$VERSION" | tr '\\/:?"<>|' '_')
+
+echo
+echo "    version: $VERSION"
+echo "    install: unzip -q '$ZIP' -d ~/.spring/engine/macos_arm64/'$ESCAPED'"

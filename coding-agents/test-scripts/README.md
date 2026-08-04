@@ -23,6 +23,20 @@ cd build-macos-legacy
 
 `run-capped.sh` takes `SCRIPT=<path>` to pick one. **Name new ones `.tdf`, not `.txt`.** The format needs semicolons on every line and the humanize hook rejects those in a `.txt`, so a `.txt` script has to be derived with a shell redirect and cannot carry a comment explaining itself.
 
+## Which engine and which Mesa a run actually uses
+
+**`run-capped.sh` defaults to `run-macos-premtl4.sh`, not `run-macos.sh`.** So a run uses `spring-premtl4`, a copy of `spring` relinked against `~/dev/mesa-install-premtl4`, and not the `spring` you just built against `~/dev/mesa-install`. Your code changes do reach it, because the launcher refreshes the copy whenever `spring` is newer, but the Mesa underneath is a different build.
+
+That distinction is easy to miss and has already produced one wrong conclusion: a packaged engine was built against `mesa-install` on the reasoning that "this is what the launcher uses", which was true of a launcher nothing runs. It also means memory figures in the plan are pre-Metal4 numbers and say nothing about rc3.
+
+| prefix | gallium | what it is |
+|---|---|---|
+| `~/dev/mesa-install-premtl4` | `26.2.0-devel` | pinned before "kk: Move to Metal4 command encoding", the one every measurement uses |
+| `~/dev/mesa-install` | `26.2.0-rc3` | carries the Metal4 change, which never returns render pass memory |
+| `~/dev/mesa-install-staging` | | scratch, not used by any launcher |
+
+`LAUNCHER=` overrides it, which is also how a packaged engine gets tested: point it at the `spring` launcher inside the archive.
+
 ## Rules that cost time to learn
 
 **Set `side`.** Without it a game with factions picks one at random per run, so two runs differ in commander model, unit set and the overlays drawn around the selection. That confounded a compiled-versus-deferred display list comparison on 2026-08-04, where the two crops being compared turned out to be two different commanders. The value is the `name` field from the game's `sidedata.lua`, not the `startunit`.
