@@ -16,6 +16,14 @@
 -- rectangle, so scoring is a plain pixel count. A clean frame gives the circles
 -- alone. A merged pair adds a long connecting segment between two circle centres,
 -- which is many pixels and cannot be confused with the circles themselves.
+--
+-- ALT_COLOURS measures a different defect with the same grid. Identical batches
+-- are what makes merging visible, and they are exactly what hides a batch
+-- inheriting the previous one's attributes, because an inherited attribute is
+-- then the same attribute. So with ALT_COLOURS the colour alternates by batch
+-- index and nothing else changes: same shape, same vertex count, same vertex
+-- format. A batch that takes the previous batch's colour draws a whole circle in
+-- the wrong one, which is every pixel of that circle rather than a stray line.
 
 function widget:GetInfo()
 	return {
@@ -31,6 +39,9 @@ end
 
 -- install-probe.sh --loops <n> rewrites this and reads it back.
 local LOOP_COUNT = 0
+
+-- install-probe.sh --alt rewrites this and reads it back.
+local ALT_COLOURS = 0
 
 -- Centre right, clear of the build menu on the left and of the probe's own echo
 -- text along the bottom, both of which overlapped the grid on the first attempt.
@@ -69,7 +80,8 @@ function widget:Initialize()
 		sines[i]   = math.sin(a) * RADIUS
 	end
 
-	Spring.Echo(string.format("[loopamp] %d line loops a frame at %d,%d", LOOP_COUNT, ORIGIN_X, ORIGIN_Y))
+	Spring.Echo(string.format("[loopamp] %d line loops a frame at %d,%d, alt colours %d",
+		LOOP_COUNT, ORIGIN_X, ORIGIN_Y, ALT_COLOURS))
 end
 
 function widget:DrawScreen()
@@ -100,6 +112,17 @@ function widget:DrawScreen()
 	for i = 0, LOOP_COUNT - 1 do
 		local cx = ORIGIN_X + (i % COLS) * SPACING
 		local cy = ORIGIN_Y + math.floor(i / COLS) * SPACING
+
+		-- The colour is set outside the batch, which is the state a batch is
+		-- meant to pick up when it begins. Magenta rather than a third hue so
+		-- both colours are saturated in channels the backdrop has none of.
+		if ALT_COLOURS ~= 0 then
+			if i % 2 == 0 then
+				glColor(0, 1, 1, 1)
+			else
+				glColor(1, 0, 1, 1)
+			end
+		end
 
 		-- One batch per circle, exactly as game_metal_spot_minimap_drawer.lua
 		-- does it. The point is the batch boundary, not the shape.

@@ -8,7 +8,10 @@
 #                                        fires at those times after it loads
 #   install-probe.sh --move              send the unit to the middle of the map and
 #                                        track it, rather than freezing the scene
-#   install-probe.sh --remove            take both out again
+#   install-probe.sh --loops 2000        also install the artefact amplifier
+#   install-probe.sh --loops 2000 --alt  the same, alternating the batch colour so
+#                                        an inherited attribute is visible
+#   install-probe.sh --remove            take them all out again
 #
 # GAME=<path to a .sdd> targets a game other than SplinterFaction. It has to be an
 # unpacked directory, not a .sdz, because this writes into it.
@@ -69,6 +72,7 @@ LUAUI_OFF=0
 SHOTS=""
 MOVE=0
 LOOPS=0
+ALT=0
 
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -96,6 +100,10 @@ while [ $# -gt 0 ]; do
 				''|*[!0-9]*) echo "--loops takes a whole number, got \"$LOOPS\""; exit 1 ;;
 			esac
 			shift 2
+			;;
+		--alt)
+			ALT=1
+			shift
 			;;
 		*)
 			echo "unknown argument \"$1\""
@@ -168,7 +176,22 @@ if [ "$LOOPS" != 0 ]; then
 		exit 1
 	fi
 
-	echo "installed $AMP_DEST with LOOP_COUNT = $LOOPS"
+	if [ "$ALT" != 0 ]; then
+		sed -i '' "s/^local ALT_COLOURS = 0\$/local ALT_COLOURS = 1/" "$AMP_DEST"
+	fi
+
+	GOT=$(grep -c "^local ALT_COLOURS = $ALT\$" "$AMP_DEST" || true)
+
+	if [ "$GOT" != 1 ]; then
+		echo "install-probe: ALT_COLOURS is not $ALT in $AMP_DEST, found:"
+		grep -n "^local ALT_COLOURS" "$AMP_DEST" || echo "  no ALT_COLOURS line at all"
+		exit 1
+	fi
+
+	echo "installed $AMP_DEST with LOOP_COUNT = $LOOPS and ALT_COLOURS = $ALT"
+elif [ "$ALT" != 0 ]; then
+	echo "--alt needs --loops, there is no amplifier to alternate"
+	exit 1
 elif [ -e "$AMP_DEST" ]; then
 	rm "$AMP_DEST"
 	echo "removed $AMP_DEST, no --loops given"

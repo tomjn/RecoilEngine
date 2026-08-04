@@ -75,6 +75,10 @@ Two flags change what a run measures, and both rewrite a constant in the install
 
 `--move` sends the starting unit to the middle of the map and puts the camera on it instead of pausing. **Frame rates in this mode are void**, because a live scene varies by a factor of two where a frozen one reads to 2.5%. Use it for hunting artefacts, where it shows what a frozen scene cannot: the move line, the waypoint marker, and line of sight sweeping over new ground. It also removes the faction from the framing, since a locked camera otherwise frames whatever position that faction's commander started at. Tracking is engine state, so it survives `luaui disable` and the unit keeps walking after every widget is gone.
 
+`--loops <n>` installs the artefact amplifier, which draws that many identical `LINE_LOOP` batches a frame so batch merging goes from about 8% of frames to all of them. Score it with `minimap_score.py <log> --amp`.
+
+`--alt` alternates the amplifier's colour by batch index, which measures a different defect with the same grid. Identical batches are what makes merging visible and exactly what hides a batch inheriting the previous one's attributes, since an inherited attribute is then the same attribute. With `--alt` a batch that takes the previous batch's colour draws a whole circle wrong, about 40 pixels against a threshold of 10. Score it with `--alt`. It varies colour only, so it cannot see an inherited texture coordinate or normal, which need a bound texture or lighting to show.
+
 Run a different game with `GAME=<path to a .sdd> ./install-probe.sh ...` and `SCRIPT=<path to a .tdf>`.
 
 Change the window without touching the shared config by passing `-config <file>` through to the engine. The engine rewrites whatever config it is given on exit, and a stale non-default left in `springsettings.cfg` is the shape of contaminated control that has already cost this project a session.

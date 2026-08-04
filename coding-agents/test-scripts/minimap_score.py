@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Score the stray-line artefact in the minimap, per diagnostic cell.
 
-    minimap_score.py <logfile> [screenshot dir]
+    minimap_score.py <logfile> [screenshot dir] [--amp | --alt]
 
 game_metal_spot_minimap_drawer.lua issues one gl.BeginEnd(GL_LINE_LOOP) per metal
 spot, so the minimap draws dozens of consecutive identical batches every frame.
@@ -48,11 +48,20 @@ def is_amp_cyan(r, g, b):
     return g > 150 and b > 150 and r < 100
 
 
+def is_amp_magenta(r, g, b):
+    return r > 150 and b > 150 and g < 100
+
+
 REGIONS = {"minimap": (MINIMAP, is_minimap_green), "amp": (AMP, is_amp_cyan)}
 
 # The amplifier's grid in image coordinates, from widget_loop_amp.lua's constants
 # with its bottom-up y flipped. A ring pixel sits at radius from the nearest node.
 AMP_GRID = (1620, 1331, 22, 7)
+
+# widget_loop_amp.lua's COLS. Needed only for --alt, where a pixel's nearest node
+# gives the row and column, those give the batch index, and the index gives the
+# colour that batch was told to draw in.
+AMP_COLS = 55
 
 
 def amp_stray_pixels(path):
@@ -88,6 +97,53 @@ def amp_stray_pixels(path):
             if abs(math.hypot(dx, dy) - r) > 2:
                 stray += 1
     return stray
+
+def amp_wrong_colour(path):
+    """Circle pixels drawn in the colour of the batch before them.
+
+    Under ALT_COLOURS the grid alternates cyan and magenta by batch index, and
+    nothing else differs between two adjacent batches: same shape, same vertex
+    count, same vertex format. So a circle in the wrong colour is a batch that
+    took the previous batch's state instead of its own, which is the defect
+    SPRING_BATCH_NORMALISE exists to fix and the one the plain amplifier cannot
+    see, because there an inherited attribute is the same attribute.
+
+    Absolute, like amp_stray_pixels. Every pixel is attributed to its nearest
+    grid node, which gives the batch index, which gives the colour that batch
+    was told to use. A whole wrong circle is about seventy pixels, so one
+    inherited batch is far above any threshold.
+    """
+    ox, oy, sp, r = AMP_GRID
+    (x0, y0, x1, y1), _ = REGIONS["amp"]
+    w, h, px = read_png(str(path))
+    x1, y1 = min(x1, w), min(y1, h)
+
+    wrong = 0
+    for y in range(y0, y1):
+        row = y * w * 3
+        for x in range(x0, x1):
+            i = row + x * 3
+            r_, g_, b_ = px[i], px[i + 1], px[i + 2]
+            cyan, magenta = is_amp_cyan(r_, g_, b_), is_amp_magenta(r_, g_, b_)
+
+            if not cyan and not magenta:
+                continue
+
+            # The nearest node, not the containing cell. A ring pixel can sit on
+            # either side of the midpoint between two nodes.
+            col = round((x - ox) / sp)
+            line = round((oy - y) / sp)
+
+            if col < 0 or col >= AMP_COLS or line < 0:
+                continue
+
+            if abs(math.hypot(x - (ox + col * sp), y - (oy - line * sp)) - r) > 2:
+                continue
+
+            if cyan != ((line * AMP_COLS + col) % 2 == 0):
+                wrong += 1
+    return wrong
+
 
 TIME = re.compile(r"^\[t=(\d\d):(\d\d):(\d\d)\.(\d+)\]")
 SHOT = re.compile(r"\[shots\] taking (\d+) of")
@@ -161,19 +217,22 @@ def main(logfile, shotdir, region):
         print(f"log has {len(shots)} shots but only {len(files)} files, refusing to guess")
         return 1
 
+    scorer = {"amp": amp_stray_pixels, "alt": amp_wrong_colour}.get(region)
+
     scored = []
     for t, f in zip(shots, files):
-        score = amp_stray_pixels(f) if region == "amp" else marked_pixels(f, region)
+        score = scorer(f) if scorer else marked_pixels(f, region)
         scored.append((cell_at(t, cells), score, f.name))
 
     # The baseline is the smallest count among frames that actually drew, not the
     # smallest overall. A shot taken before the widget started drawing reads near
     # zero, and using that as the reference makes every later frame score the
     # whole drawing as excess. That voided one run: every cell read about 10,000.
-    if region == "amp":
+    if scorer:
         # Absolute, see amp_stray_pixels. No frame is needed as a reference.
         clean = 0
-        print(f"{region}: stray pixels counted against the known grid\n")
+        what = "stray pixels" if region == "amp" else "wrong-colour pixels"
+        print(f"{region}: {what} counted against the known grid\n")
     else:
         counts = sorted(s for _, s, _ in scored)
         typical = counts[len(counts) // 2]
@@ -191,14 +250,14 @@ def main(logfile, shotdir, region):
     by_cell = {}
     for cell, score, name in scored:
         by_cell.setdefault(cell, []).append(score - clean)
-        flag = "  <-- stray" if score - clean > (10 if region == "amp" else 50) else ""
+        flag = "  <-- stray" if score - clean > (10 if scorer else 50) else ""
         print(f"  {str(cell):>10}  excess {score - clean:>6}  {name}{flag}")
 
     print()
     # A shot taken after the last cell ended has no cell, which is not sortable
     # against a string. Those are dropped from the comparison rather than pooled.
     for cell, excess in sorted(by_cell.items(), key=lambda kv: str(kv[0])):
-        bad = sum(1 for e in excess if e > (10 if region == "amp" else 50))
+        bad = sum(1 for e in excess if e > (10 if scorer else 50))
         print(f"{str(cell):>10}: n={len(excess)}  median {int(statistics.median(excess))}"
               f"  max {max(excess)}  stray in {bad}/{len(excess)}")
 
@@ -207,7 +266,13 @@ def main(logfile, shotdir, region):
 
 if __name__ == "__main__":
     log = sys.argv[1]
-    region = "amp" if "--amp" in sys.argv else "minimap"
+    region = "minimap"
+
+    if "--amp" in sys.argv:
+        region = "amp"
+    if "--alt" in sys.argv:
+        region = "alt"
+
     rest = [a for a in sys.argv[2:] if not a.startswith("--")]
     shots = rest[0] if rest else str(Path.home() / "dev/spring-testdata/screenshots")
     sys.exit(main(log, shots, region))
