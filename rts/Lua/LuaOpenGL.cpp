@@ -10,6 +10,7 @@
 
 #include "Rendering/GL/myGL.h"
 
+#include <cstdlib>
 #include <vector>
 #include <algorithm>
 #include <optional>
@@ -6289,7 +6290,29 @@ int LuaOpenGL::CreateList(lua_State* L)
 	// the list, so glBeginBatch cannot help a batch that is baked into one, and
 	// neither can any flush at replay time. Keep the function instead and run it
 	// live on every gl.CallList, which is the path the mitigation does reach.
-	if (!globalRendering->supportImmediateModeBatching) {
+	//
+	// TEMP diagnostic, not for merge. SPRING_COMPILE_LISTS=1 compiles anyway.
+	// The reasoning above is about the flush, which has since been replaced by
+	// uniform vertex arity plus the full attribute set after every glBegin, and
+	// both of those are ordinary GL calls that record into a list like any other.
+	// If that holds the deferred path is obsolete, and it is expensive: replaying
+	// by re-running the Lua costs the whole build every call, which is 790,748
+	// vertices a frame and three quarters of the frame time in Metal Factions,
+	// whose map edge widget builds one list and calls it 16 times.
+	//
+	// Read once rather than per frame, because a list is built at load time and
+	// cycling this mid-run could not change a list that already exists.
+	static const bool forceCompile = (getenv("SPRING_COMPILE_LISTS") != nullptr);
+	static bool loggedCompileMode = false;
+
+	if (!loggedCompileMode) {
+		loggedCompileMode = true;
+		LOG("[DeferList] batching=%d forceCompile=%d, lists will be %s",
+			int(globalRendering->supportImmediateModeBatching), int(forceCompile),
+			(globalRendering->supportImmediateModeBatching || forceCompile) ? "compiled" : "deferred");
+	}
+
+	if (!globalRendering->supportImmediateModeBatching && !forceCompile) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
 		// A deferred list holds a Lua closure and its upvalues, not a GL name.
