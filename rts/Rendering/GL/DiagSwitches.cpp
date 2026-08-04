@@ -28,6 +28,7 @@ namespace {
 		{ "nopresent", DiagSwitches::NO_PRESENT,     "SPRING_NO_PRESENT"     },
 		{ "finish",    DiagSwitches::FRAME_FINISH,   "SPRING_FRAME_FINISH"   },
 		{ "throttle",  DiagSwitches::FRAME_THROTTLE, "SPRING_FRAME_THROTTLE" },
+		{ "listflush", DiagSwitches::LIST_FLUSH,     "SPRING_LIST_FLUSH"     },
 	};
 
 	struct Cell {

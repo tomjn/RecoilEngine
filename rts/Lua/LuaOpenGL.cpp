@@ -6368,12 +6368,24 @@ int LuaOpenGL::CreateList(lua_State* L)
 	SetDrawingEnabled(L, true);
 
 	// build the list with the specified lua call/args
+	// TEMP diagnostic, not for merge. The compile half of SPRING_LIST_FLUSH.
+	// glBeginBatch's flush runs at compile time and is never recorded, so batches
+	// baked into a list are the one case it cannot reach. Submitting either side
+	// of the compile does not repair them either, measured 10 of 37 frames against
+	// 15 of 35, so this is kept as the record of a mitigation that was tried and
+	// failed rather than as a fix.
+	if (DiagSwitches::On(DiagSwitches::LIST_FLUSH))
+		glFlush();
+
 	glNewList(list, GL_COMPILE);
 	SMatrixStateData prevMSD = GetLuaContextData(L)->glMatrixTracker.PushMatrixState(true);
 	const int error = lua_pcall(L, (args - 1), 0, 0);
 	SMatrixStateData matData = GetLuaContextData(L)->glMatrixTracker.GetMatrixState();
 	GetLuaContextData(L)->glMatrixTracker.PopMatrixState(prevMSD, false);
 	glEndList();
+
+	if (DiagSwitches::On(DiagSwitches::LIST_FLUSH))
+		glFlush();
 
 	if (error != 0) {
 		glDeleteLists(list, 1);
@@ -6444,6 +6456,14 @@ int LuaOpenGL::CallList(lua_State* L)
 		int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
 		if (error == 0) {
 			glCallList(dlist);
+
+			// TEMP diagnostic, not for merge. The replay half of SPRING_LIST_FLUSH.
+			// Without it the first live text drawn after a list containing text is
+			// lost, and every piece of GL state at that draw measures correct, which
+			// leaves the driver dropping a draw that follows a replay.
+			if (DiagSwitches::On(DiagSwitches::LIST_FLUSH))
+				glFlush();
+
 			return 0;
 		}
 		luaL_error(L, "Matrix stack %sflow in gl.CallList", (error > 0) ? "over" : "under");

@@ -30,6 +30,7 @@ namespace DiagSwitches {
 		NO_PRESENT,        // SPRING_NO_PRESENT, skip the readback and present
 		FRAME_FINISH,      // SPRING_FRAME_FINISH, glFinish once per frame
 		FRAME_THROTTLE,    // SPRING_FRAME_THROTTLE, sleep to 60 fps
+		LIST_FLUSH,        // SPRING_LIST_FLUSH, submit around display list compile and replay
 		SWITCH_COUNT
 	};
 
