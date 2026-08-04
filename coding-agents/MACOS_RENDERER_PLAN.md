@@ -1230,13 +1230,43 @@ The control run is formally void on focus, 5 of 45 polls, but the losses start a
 
 **The cheap test is a counter, not another A/B.** Count `glBeginBatch` calls and vertices per frame and log them per cell, the same way the plan already proposes counting `glBindFramebuffer`. Tens of thousands of batches a frame would settle it. Twenty would kill it. Note that "the CPU is idle" is not evidence against this, because a main thread blocked waiting on the GPU looks idle whatever the driver thread is doing, and that has never been checked separately.
 
+**There are two batching defects, not one, and each needs its own mitigation, settled 2026-08-04.** This corrects the conclusion above that uniform vertex arity replaces the flush. It does not. Measured with `SPRING_DIAG_CELLS=10:-/flush/normalise` interleaved in one run, scoring stray pixels per frame:
+
+| cell | frames with the artefact | median stray pixels |
+|---|---|---|
+| `-` | 31 of 31 | 28 |
+| `flush` | **0 of 30** | **0** |
+| `normalise` | 27 of 29 | 42 |
+
+The flush suppresses it completely. `normalise` does nothing for it whatsoever. Matching each mitigation to what it actually fixes:
+
+| defect | symptom | fixed by |
+|---|---|---|
+| consecutive batches merge | the minimap's stray lines, the amplifier's strays | `flush` only |
+| a batch inherits the previous one's attributes | the build menu's stray polygon | `normalise` only |
+| varying vertex arity | the original load screen corruption | arity, already the default |
+
+**So the engine currently ships one mitigation out of three.** Arity is on by default, the flush is opt-in behind `SPRING_BATCH_FLUSH`, and the attribute set was designed at line 893 and never written until today. Batch merging is therefore unfixed in normal play, which is what the stray line in SplinterFaction's minimap has been all along.
+
+**The arity half was itself incomplete.** It normalised vertices and nothing else. `gl.TexCoord` and `gl.MultiTexCoord` both emit 1f, 2f, 3f or 4f depending on how Lua called them, so texture coordinate arity varied across batches exactly as vertex arity used to. Both now widen to 4f, which is semantics-preserving since `glTexCoord2f(x, y)` is defined as `(x, y, 0, 1)`. Nothing else can vary: colour is always emitted as 4f, normals and secondary colour have no form other than three components, a fog coordinate is one float and an edge flag is a boolean.
+
+**`SPRING_BATCH_NORMALISE` restates colour, texture coordinate and normal immediately after every `glBeginBatch`,** so a batch does not depend on what the previous one left current. Colour was already shadowed in `LuaOpenGL::color`, the other two are new. It is shadowed rather than read back with `glGet`, because a `glGet` per begin would stall the pipeline hundreds of times a frame.
+
+**Amplification is what made the merging defect measurable, and it is the transferable method here.** In real content the artefact appears in about 8% of frames, so a 240 sample run yields nine events and baseline against flush came out 9 of 115 against 4 of 115, p about 0.25. `widget_loop_amp.lua` draws 2000 identical `LINE_LOOP` batches a frame, the same shape `game_metal_spot_minimap_drawer.lua:59` uses one of per metal spot. That puts the artefact in 100% of frames with a graded magnitude, and the question stops being "did it happen" and becomes "how much", which is why 30 samples a side was then overwhelming.
+
+**Two scoring mistakes, both of which produced confident zeroes, do not repeat them.** Scoring by excess over the run's minimum fails if any frame was captured before the widget drew, because that frame becomes the reference and every other frame scores the entire drawing as excess: one run read about 10,000 in every cell. It fails again, in the opposite direction, once the artefact is in every frame, because then there is no clean frame to subtract and the run reads zero everywhere while the screen is visibly full of stray lines. `minimap_score.py` now counts absolutely, using the fact that the grid is regular and known, so every legitimate pixel lies at the circle radius from a node. A histogram over one frame put 79,711 pixels on the ring and 32 off it.
+
+**Compiled display lists are worth 5.1x and are still blocked, 2026-08-04.** `SPRING_COMPILE_LISTS=1` ignores the deferral and compiles as normal. Metal Factions goes from 8.97 to 46.0 fps, 111.5ms to 21.7ms, and Lua vertices a frame fall from 790,748 to 147. SplinterFaction roughly doubles, 15.2 to 30 fps. `normalise` clears the build menu polygon that compilation reintroduces, verified against the author's own screenshots. What still blocks it is the resource bar's research readout, which is lost under compilation and is **not** a display list problem: `gui_static_resourcebar.lua:773` draws that panel immediate-mode outside any list, and the numbers that are inside the lists render correctly.
+
+**Method notes that cost time today.** A game with factions picks one at random per run unless the start script sets `side`, and two runs then differ in commander, unit set and any number the UI displays, which is not a rendering difference. Fog of war means world-space overlays cannot be compared by brightness unless the scene is identical. And `install-probe.sh --move` sends the unit to the middle of the map and tracks it, which removes the faction from the camera framing entirely and exercises overlays a frozen scene never draws. Frame rates in that mode are void.
+
 **Start here next, in this order.**
 
-1. **Count immediate-mode batches and vertices per frame**, logged per cell alongside the frame rate. This is the one test that would confirm or kill the immediate-mode hypothesis above, it needs no A/B, and Metal Factions gives it a 95.7ms signal to work against rather than SplinterFaction's 48.9ms. Count `glBindFramebuffer` in the same pass, since the render-pass model predicts both.
-2. **Find which widgets cost the time.** `luaui disable` is all or nothing across 167 widgets in SplinterFaction and 69 in Metal Factions. The full-screen effect widgets are the obvious suspects and can be removed individually, which is a bisect rather than a single number.
-3. **Spawn a fixed set of units from a gadget.** Every frame rate in this document was measured with `units=1`, which is not representative of play. The same gadget in two games makes them comparable for the first time. Empty Mod cannot host it without unit definitions, so it belongs in a game that has them.
+1. **Decide whether the flush goes back on by default** for drivers without immediate-mode batching, alongside arity and `normalise`. All three are needed and each covers something the others do not. The cost is the 7.5% measured above, about 4.7ms on SplinterFaction, against 49ms that the game's own LuaUI costs. This is a change to what ships rather than a diagnostic.
+2. **Find why compiled lists lose the research readout.** It is the only artefact still blocking `SPRING_COMPILE_LISTS`, which is worth 5.1x on Metal Factions, and it is immediate-mode text drawn outside any list, so neither the deferral nor the batching mitigations explain it.
+3. **Find which widgets cost the time.** `luaui disable` is all or nothing across 167 widgets in SplinterFaction and 69 in Metal Factions. Two smaller leads from watching a live game: the build menu costs about 10 fps reliably when opened, and deselecting the starting unit gains about 10.
 
-**Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not.
+**Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not. Whether uniform arity alone fixes batch merging, which it does not. Whether `normalise` fixes batch merging, which it does not.
 
 Not worth retrying, all measured: the present path, cheaper CPU-side drawing, raw fill, render scaling, `MacHiDPIRendering = 0`, and the engine feature sweep.
 
