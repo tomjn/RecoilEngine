@@ -24,6 +24,7 @@ namespace {
 	const Named SWITCHES[] = {
 		{ "flush",     DiagSwitches::BATCH_FLUSH,    "SPRING_BATCH_FLUSH"    },
 		{ "narrow",    DiagSwitches::BATCH_NARROW,   "SPRING_BATCH_NARROW"   },
+		{ "normalise", DiagSwitches::BATCH_NORMALISE,"SPRING_BATCH_NORMALISE"},
 		{ "noflush",   DiagSwitches::NO_BATCH_FLUSH, "SPRING_NO_BATCH_FLUSH" },
 		{ "nopresent", DiagSwitches::NO_PRESENT,     "SPRING_NO_PRESENT"     },
 		{ "finish",    DiagSwitches::FRAME_FINISH,   "SPRING_FRAME_FINISH"   },

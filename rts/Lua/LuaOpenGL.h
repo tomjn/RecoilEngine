@@ -140,6 +140,11 @@ class LuaOpenGL {
 		static void RevertWorldLighting();
 
 	private:
+		// TEMP diagnostic, not for merge. Begins a batch and, under
+		// SPRING_BATCH_NORMALISE, restates the current attribute set so the batch
+		// does not inherit it. See the definition in LuaOpenGL.cpp.
+		static void BeginBatch(GLenum mode);
+
 		inline static std::array<float, 4> color;
 
 		static DrawMode drawMode;
