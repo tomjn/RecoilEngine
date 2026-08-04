@@ -1256,17 +1256,74 @@ The flush suppresses it completely. `normalise` does nothing for it whatsoever. 
 
 **Two scoring mistakes, both of which produced confident zeroes, do not repeat them.** Scoring by excess over the run's minimum fails if any frame was captured before the widget drew, because that frame becomes the reference and every other frame scores the entire drawing as excess: one run read about 10,000 in every cell. It fails again, in the opposite direction, once the artefact is in every frame, because then there is no clean frame to subtract and the run reads zero everywhere while the screen is visibly full of stray lines. `minimap_score.py` now counts absolutely, using the fact that the grid is regular and known, so every legitimate pixel lies at the circle radius from a node. A histogram over one frame put 79,711 pixels on the ring and 32 off it.
 
-**Compiled display lists are worth 5.1x and are still blocked, 2026-08-04.** `SPRING_COMPILE_LISTS=1` ignores the deferral and compiles as normal. Metal Factions goes from 8.97 to 46.0 fps, 111.5ms to 21.7ms, and Lua vertices a frame fall from 790,748 to 147. SplinterFaction roughly doubles, 15.2 to 30 fps. `normalise` clears the build menu polygon that compilation reintroduces, verified against the author's own screenshots. What still blocks it is the resource bar's research readout, which is lost under compilation and is **not** a display list problem: `gui_static_resourcebar.lua:773` draws that panel immediate-mode outside any list, and the numbers that are inside the lists render correctly.
+**Compiled display lists are worth 5.1x and are still blocked, 2026-08-04.** `SPRING_COMPILE_LISTS=1` ignores the deferral and compiles as normal. Metal Factions goes from 8.97 to 46.0 fps, 111.5ms to 21.7ms, and Lua vertices a frame fall from 790,748 to 147. SplinterFaction roughly doubles, 15.2 to 30 fps. ~~`normalise` clears the build menu polygon that compilation reintroduces.~~ **Retracted, it does not, see below.** What still blocks it is the resource bar's research readout, which is lost under compilation and is **not** a display list problem: `gui_static_resourcebar.lua:773` draws that panel immediate-mode outside any list, and the numbers that are inside the lists render correctly.
+
+**`SPRING_BATCH_NORMALISE` must not default on. On top of the flush it reintroduces batch merging, measured 2026-08-04.** One interleaved run, four cells, 53 shots, scored absolutely against the known grid:
+
+| cell | mitigations | frames with strays | stray pixels |
+|---|---|---|---|
+| `-` | arity + flush | **0 of 13** | **0** |
+| `normalise` | arity + flush + normalise | **14 of 14** | 12 |
+| `noflush` | arity | 7 of 15 | 10 |
+| `noflush,normalise` | arity + normalise | 9 of 11 | 19 |
+
+The default is clean and adding `normalise` to it is not. The regression is deterministic, exactly 12 stray pixels in every frame where merging is otherwise random per pair, which is what said to look at the pixels rather than the summary. They are two short segments joining a magenta circle to a cyan one, interpolating between the two colours, which is only possible if vertices from two batches ended up in one primitive. Screenshots of the same coordinates in the two cells confirm it: clean under `-`, joined under `normalise`.
+
+**A hypothesis for why, untested.** `LuaOpenGL::BeginBatch` emits colour, texture coordinate and normal after `glBegin`, which widens that batch's vertex format against a batch that emits none, and a vertex format that varies across batches is the original trigger for this whole family. Engine batches through `glBeginBatch` are not normalised and `gl.Rect` never was, so the mixture is exactly the shape that reproduces.
+
+**The defect `normalise` was written for does not appear on the live path at all.** The amplifier now alternates the batch colour under `--alt`, so a batch that inherits the previous one's attributes draws a whole circle in the wrong colour, about 40 pixels against a threshold of 10. Zero wrong circles in all 53 shots, in every cell including `noflush`. So attribute inheritance is still a compiled-list phenomenon only, and nothing on the live path needs it.
+
+**Scope of that null result.** The amplifier varies colour and nothing else, deliberately, so that geometry and vertex format are identical between adjacent batches. It therefore cannot see an inherited texture coordinate or normal, which need a bound texture or lighting to become visible, and it does not model the build menu's stray polygon, which is geometry. It says colour inheritance does not happen live. It does not say `normalise` is unnecessary under compilation, where the artefact was actually observed.
+
+**The instrument was proved before it was believed.** A scorer that reads zero proves nothing until it has been shown to read non-zero on an image that definitely contains what it counts. Recolouring circles in a real screenshot and rescoring gives 0 unmodified, 40 for one wrong circle, 120 for three and 76,700 for all of them. The first attempt at that control swapped red and blue, which turns cyan into yellow and leaves magenta alone, so every case read zero and the scorer looked broken when the control was.
+
+**The research readout is unblocked. A `glFlush` after `glCallList` restores it, and it costs nothing, 2026-08-04.** `SPRING_LIST_FLUSH=1` adds the flush and the resource bar's research value and rate come back under `SPRING_COMPILE_LISTS=1`, verified against the unmodified widget. Frame rate with the flush is 29.4 fps against 29.5 without, ten cycles each, which is inside run to run drift. So the last artefact blocking compiled lists has a fix that is free.
+
+**How it was narrowed, because the answer is a driver defect and that claim needs its evidence.** Each step is one run:
+
+| step | result |
+|---|---|
+| the same panel drawn before the lists as well as after | the copy before renders, the copy after does not |
+| a copy after each of the three lists | fine after the background list, lost after the static and dynamic ones, which are the two that contain text |
+| the widget's other font, which no list has compiled | equally lost, so it is not the font object |
+| a string the static list draws every frame, printed live | equally lost, so it is not a missing glyph in the atlas |
+| the font's unbuffered path, with no `Begin`/`End` | equally lost, so it is not the shared render buffer |
+| every piece of GL state read at the lost draw | framebuffer 0, `GL_BACK`, full viewport, colour mask 1111, scissor test off, no stencil, blend on, depth off, right texture, right program, matrices identical to the working run, `glGetError` clean, 42 indices submitted for 7 characters |
+
+So the engine issues a correct, well-formed draw and the driver does not render it. Everything on the engine side is excluded by measurement rather than by argument. It is the same shape as the immediate-mode batching defect, a state transition the driver mishandles with no GL error raised, and it answers to the same mitigation.
+
+**Two engine theories died on the way, do not retry them.** The atlas upload guard at `glFontRenderer.cpp:214` skips the upload whenever `GL_LIST_INDEX` says a list is being recorded, and that guard is sound here: instrumented against the engine's own compile flag it read `dl=267` while compiling, so the driver reports list state correctly and the atlas is not involved. And the glyphs are present regardless, since a string the lists render every frame is equally invisible when drawn live.
+
+**Method note.** The engine cannot tell which Lua draw is which, so the widget echoed a marker either side of the panel and the markers and the font log were read interleaved by timestamp. That is what identified the lost draw as the one submitting 42 indices, and it is worth reaching for before adding more instrumentation.
+
+**Compiled display lists cannot ship. The build menu's content area is destroyed and no mitigation reaches it, settled 2026-08-04.** This retracts the earlier claim above that `normalise` clears the artefact compilation reintroduces. It does not.
+
+The artefact only appears while the menu is scrolling, because `gui_static_buildordermenu.lua` marks itself dirty on every scroll step and `BakeStaticLayer` deletes and recompiles `buildList`. A frozen scene compiles it once and never again, so a frozen A/B measures two clean frames and reads as "no artefact". Driving the scroll from the widget's own `Update` reproduces it at will.
+
+Recolouring every element of the menu in a distinct opaque colour is what identified it. The panel chrome is correct, red shell, blue fill, yellow accent, pink scrollbar. What goes white is exactly the scissored content region, where the headers, button bodies and info strips should be. White is GL's default current colour, so those batches lose their colour and their bounds together and fill the whole scissor rect, which is why it reads as the back of the panel.
+
+| configuration | frames with the content area destroyed |
+|---|---|
+| compiled, `-` | 15 of 35, and 5 of 36 in a second run |
+| compiled, `normalise` | 6 of 36 |
+| compiled, `listflush` | 10 of 37 |
+| **deferred, what ships** | **0 of 37** |
+
+Neither mitigation is distinguishable from baseline, and the baseline rate itself swings from 14% to 43% between runs, which is why both sides of a comparison have to sit in one run. Deferral is clean.
+
+**Why no flush can fix this, and why the deferral exists.** `glBeginBatch`'s flush executes during compilation and is never recorded, so a list carries no per-batch separation at all, and nothing at replay can insert any. `SPRING_LIST_FLUSH` flushing either side of the compile and after `glCallList` does not help, because the batches inside the list were already merged when it was built. So the 5.1x on Metal Factions is not available on this driver: compiled lists render the game's own interface wrong.
+
+**What ships is unchanged: uniform arity plus the per-batch flush plus the deferral.** `SPRING_BATCH_NORMALISE` stays off, `SPRING_COMPILE_LISTS` stays off, and `SPRING_LIST_FLUSH` only matters if compiled lists are ever revisited.
 
 **Method notes that cost time today.** A game with factions picks one at random per run unless the start script sets `side`, and two runs then differ in commander, unit set and any number the UI displays, which is not a rendering difference. Fog of war means world-space overlays cannot be compared by brightness unless the scene is identical. And `install-probe.sh --move` sends the unit to the middle of the map and tracks it, which removes the faction from the camera framing entirely and exercises overlays a frozen scene never draws. Frame rates in that mode are void.
 
 **Start here next, in this order.**
 
-1. **Decide whether the flush goes back on by default** for drivers without immediate-mode batching, alongside arity and `normalise`. All three are needed and each covers something the others do not. The cost is the 7.5% measured above, about 4.7ms on SplinterFaction, against 49ms that the game's own LuaUI costs. This is a change to what ships rather than a diagnostic.
-2. **Find why compiled lists lose the research readout.** It is the only artefact still blocking `SPRING_COMPILE_LISTS`, which is worth 5.1x on Metal Factions, and it is immediate-mode text drawn outside any list, so neither the deferral nor the batching mitigations explain it.
+1. ~~**Decide whether the flush goes back on by default.**~~ **Done.** The flush ships on. `normalise` stays opt-in, because on top of the flush it reintroduces merging, see above. What ships is arity plus the flush.
+2. ~~**Find why compiled lists lose the research readout.**~~ **Done.** `SPRING_LIST_FLUSH=1` restores it for no measurable cost. It does not matter in practice, because compiled lists cannot ship for a separate reason, see above.
 3. **Find which widgets cost the time.** `luaui disable` is all or nothing across 167 widgets in SplinterFaction and 69 in Metal Factions. Two smaller leads from watching a live game: the build menu costs about 10 fps reliably when opened, and deselecting the starting unit gains about 10.
 
-**Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not. Whether uniform arity alone fixes batch merging, which it does not. Whether `normalise` fixes batch merging, which it does not.
+**Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not. Whether uniform arity alone fixes batch merging, which it does not. Whether `normalise` fixes batch merging, which it does not, and whether it should default on, which it should not.
 
 Not worth retrying, all measured: the present path, cheaper CPU-side drawing, raw fill, render scaling, `MacHiDPIRendering = 0`, and the engine feature sweep.
 
