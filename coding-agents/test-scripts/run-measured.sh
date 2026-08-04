@@ -16,6 +16,10 @@
 # uncovered as well as focused.
 #
 # Wraps run-capped.sh, so the memory ceiling and the time limit still apply.
+#
+# To prove what was on screen rather than watching it, use
+# install-probe.sh --shots. Driving the engine's screenshot action from here
+# through synthetic keystrokes was tried and produced no files at all.
 set -u
 
 LIMIT_SECONDS=${1:?seconds}

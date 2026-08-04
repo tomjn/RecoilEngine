@@ -30,7 +30,24 @@ local LOCK_FRAME = 90   -- sim frame to freeze at, 3 seconds in
 local INTERVAL   = 5    -- seconds between reports
 local TOP_N      = 16   -- timers reported, by share of wall clock
 
+-- Seconds after the freeze to issue "luaui disable", or 0 to never issue it.
+-- install-probe.sh --luaui-off <seconds> rewrites this line in the installed copy
+-- and then reads it back, because os.getenv is stripped from the Lua sandbox at
+-- LuaLibs.cpp:57 so the widget cannot be told at run time.
+--
+-- The disable removes the probe along with every other widget, which is the point:
+-- it splits the game's cost into its 167 widgets against its gadgets, where the
+-- unit materials live. Nothing re-enables it, so a run holds one switch and the
+-- cycles either side of it are the two sides of the comparison.
+--
+-- The freeze survives, because "pause" is engine state rather than widget state,
+-- and nothing is left to move the camera. Frame rates keep coming from the engine
+-- through SPRING_DIAG_CELLS, which does not go through Lua at all.
+local DISABLE_AFTER = 0
+
 local lockedCam  = nil
+local frozenAt   = nil
+local disabled   = false
 local drawFrames = 0
 local lastReport = nil
 
@@ -63,8 +80,36 @@ function widget:GameFrame(f)
 	end
 
 	lockedCam = Spring.GetCameraState()
+	frozenAt = Spring.GetTimer()
 	Spring.SendCommands("pause 1")
 	Spring.Echo(string.format("[probe] scene frozen at sim frame %d, %s", f, sceneSummary()))
+
+	if DISABLE_AFTER > 0 then
+		Spring.Echo(string.format("[probe] luaui disable scheduled for %ds after the freeze", DISABLE_AFTER))
+	else
+		Spring.Echo("[probe] luaui disable not scheduled")
+	end
+end
+
+-- Issued from Update rather than from a draw callback, because it unloads every
+-- widget including this one and the widget list is being walked during a draw.
+local function maybeDisableLuaUI()
+	if disabled or DISABLE_AFTER <= 0 or frozenAt == nil then
+		return
+	end
+
+	if Spring.DiffTimers(Spring.GetTimer(), frozenAt) < DISABLE_AFTER then
+		return
+	end
+
+	disabled = true
+
+	-- Everything worth recording has to be echoed first. Nothing below the
+	-- SendCommands is guaranteed to run, and no widget survives to log the frames
+	-- that follow. The unit count carries over because the sim is paused, so no
+	-- unit can spawn or die after this point.
+	Spring.Echo(string.format("[probe] issuing luaui disable, %s", sceneSummary()))
+	Spring.SendCommands("luaui disable")
 end
 
 function widget:DrawScreen()
@@ -96,6 +141,10 @@ function widget:Update()
 	if not ok then
 		Spring.Echo("[probe] profiler read failed, scene stays frozen: " .. tostring(err))
 	end
+
+	-- Last, so a full report always immediately precedes the switch and the
+	-- LuaUI-on side of the run ends on a logged scene summary.
+	maybeDisableLuaUI()
 end
 
 -- Spring.GetProfilerTimeRecord had two bugs: it read its optional second

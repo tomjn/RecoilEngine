@@ -19,6 +19,7 @@ cd build-macos-legacy
 | `empty-mod.txt` | Empty Mod | an empty game, so a loose `LuaIntro/main.lua` in the data dir is the only thing that draws. The controlled harness for Lua drawing bugs. |
 | `empty-mod-valles.tdf` | Empty Mod | the same, on the SplinterFaction script's map, so a run differs in content only. Measures what the map alone costs. |
 | `splinterfaction-fixed-start.txt` | SplinterFaction 0.1.78 | a real game with a real LuaUI. |
+| `metal-factions-valles.tdf` | Metal Factions v2.58 | a second real game on the same map, with an unrelated LuaUI. Sets `side=aven` so the faction is the same every run. |
 
 `run-capped.sh` takes `SCRIPT=<path>` to pick one. **Name new ones `.tdf`, not `.txt`.** The format needs semicolons on every line and the humanize hook rejects those in a `.txt`, so a `.txt` script has to be derived with a shell redirect and cannot carry a comment explaining itself.
 
@@ -32,9 +33,11 @@ cd build-macos-legacy
 
 ## Games available to test against
 
-SplinterFaction is the only game with a LuaUI that has actually been run on this renderer, so every LuaUI finding so far rests on one game's content. That is a real weakness in the evidence.
+SplinterFaction and Metal Factions both run, and their LuaUIs have little in common, so a LuaUI finding no longer rests on one game's content.
 
-Metal Factions and MCL are installed. Whether Metal Factions runs at all is unverified, and XTA and Balanced Annihilation may not either. Confirming which of them start is worth doing on its own, before any of them is used as a control.
+Metal Factions needs unpacking. It ships as `metal_factions-v2.58.sdz` and the probes have to be written into the game, so it lives beside SplinterFaction as `metal_factions-v2.58.sdd`, 141M unpacked. Point the installer at it with `GAME=`.
+
+MCL is installed and unverified. XTA and Balanced Annihilation may not run either. Confirming which of them start is worth doing on its own, before any of them is used as a control.
 
 ## Measuring
 
@@ -47,6 +50,16 @@ SPRING_DIAG_CELLS=5:-/flush \
 python3 cells.py ~/dev/spring-testdata/logs/run.log
 ./install-probe.sh --remove             # leave the game unmodified
 ```
+
+Two flags change what a run measures, and both rewrite a constant in the installed copy and then read it back, because three results in one session were mislabelled by patches that silently did not apply.
+
+`--luaui-off <seconds>` issues `luaui disable` that long after the freeze, which removes every widget and the probe with it. The scene stays frozen, because pause is engine state, and the frame rate keeps coming from `SPRING_DIAG_CELLS`. The cycles either side of the switch are the two sides, so one run holds both.
+
+`--shots <seconds>[,...]` installs a LuaRules gadget that calls the engine's screenshot action at those times. It is a gadget rather than a widget so it survives `luaui disable`, which is the frame that most needs proving. Files land in `<data dir>/screenshots/` and the log says which shot was taken and what the unit count was.
+
+Run a different game with `GAME=<path to a .sdd> ./install-probe.sh ...` and `SCRIPT=<path to a .tdf>`.
+
+Change the window without touching the shared config by passing `-config <file>` through to the engine. The engine rewrites whatever config it is given on exit, and a stale non-default left in `springsettings.cfg` is the shape of contaminated control that has already cost this project a session.
 
 `run-measured.sh` wraps `run-capped.sh`, so the memory ceiling and time limit still apply, and adds focus. It brings the window to the front and then reads frontmost back to confirm it, because `osascript ... set frontmost` succeeds against a process that has no window yet and the engine has none for the first several seconds of loading. It re-asserts focus on a lost poll and voids the run above one lost poll in twenty. It cannot check occlusion, so keep the window uncovered too.
 
