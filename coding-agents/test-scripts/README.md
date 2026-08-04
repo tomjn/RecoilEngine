@@ -18,12 +18,14 @@ cd build-macos-legacy
 |---|---|---|
 | `empty-mod.txt` | Empty Mod | an empty game, so a loose `LuaIntro/main.lua` in the data dir is the only thing that draws. The controlled harness for Lua drawing bugs. |
 | `empty-mod-valles.tdf` | Empty Mod | the same, on the SplinterFaction script's map, so a run differs in content only. Measures what the map alone costs. |
-| `splinterfaction-fixed-start.txt` | SplinterFaction 0.1.78 | a real game with a real LuaUI. |
+| `splinterfaction-fixed-start.tdf` | SplinterFaction 0.1.78 | a real game with a real LuaUI. Sets `side` so the faction is the same every run. |
 | `metal-factions-valles.tdf` | Metal Factions v2.58 | a second real game on the same map, with an unrelated LuaUI. Sets `side=aven` so the faction is the same every run. |
 
 `run-capped.sh` takes `SCRIPT=<path>` to pick one. **Name new ones `.tdf`, not `.txt`.** The format needs semicolons on every line and the humanize hook rejects those in a `.txt`, so a `.txt` script has to be derived with a shell redirect and cannot carry a comment explaining itself.
 
 ## Rules that cost time to learn
+
+**Set `side`.** Without it a game with factions picks one at random per run, so two runs differ in commander model, unit set and the overlays drawn around the selection. That confounded a compiled-versus-deferred display list comparison on 2026-08-04, where the two crops being compared turned out to be two different commanders. The value is the `name` field from the game's `sidedata.lua`, not the `startunit`.
 
 **`startpostype=0`.** Fixed start positions. Anything else lands in a placement screen, which for SplinterFaction is its own LuaUI screen rather than the engine's selector, so it is a different code path and a poor thing to measure against.
 
@@ -56,6 +58,8 @@ Two flags change what a run measures, and both rewrite a constant in the install
 `--luaui-off <seconds>` issues `luaui disable` that long after the freeze, which removes every widget and the probe with it. The scene stays frozen, because pause is engine state, and the frame rate keeps coming from `SPRING_DIAG_CELLS`. The cycles either side of the switch are the two sides, so one run holds both.
 
 `--shots <seconds>[,...]` installs a LuaRules gadget that calls the engine's screenshot action at those times. It is a gadget rather than a widget so it survives `luaui disable`, which is the frame that most needs proving. Files land in `<data dir>/screenshots/` and the log says which shot was taken and what the unit count was.
+
+`--move` sends the starting unit to the middle of the map and puts the camera on it instead of pausing. **Frame rates in this mode are void**, because a live scene varies by a factor of two where a frozen one reads to 2.5%. Use it for hunting artefacts, where it shows what a frozen scene cannot: the move line, the waypoint marker, and line of sight sweeping over new ground. It also removes the faction from the framing, since a locked camera otherwise frames whatever position that faction's commander started at. Tracking is engine state, so it survives `luaui disable` and the unit keeps walking after every widget is gone.
 
 Run a different game with `GAME=<path to a .sdd> ./install-probe.sh ...` and `SCRIPT=<path to a .tdf>`.
 

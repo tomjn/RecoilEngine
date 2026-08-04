@@ -18,7 +18,7 @@ shift 2
 BUILD=/Users/tomjn/dev/RecoilEngine/build-macos-legacy
 # SCRIPT= points it at a different start script, which is how a run against
 # another game is held to the same map and resolution.
-SCRIPT=${SCRIPT:-/Users/tomjn/dev/RecoilEngine/coding-agents/test-scripts/splinterfaction-fixed-start.txt}
+SCRIPT=${SCRIPT:-/Users/tomjn/dev/RecoilEngine/coding-agents/test-scripts/splinterfaction-fixed-start.tdf}
 # Default to the pre-Metal4 Mesa. 26.2.0-rc3 carries c08dba83025, which never
 # reclaims the memory a render pass allocates, and the engine dies at about 12
 # seconds. Set LAUNCHER=./run-macos.sh to go back to it for an A/B.

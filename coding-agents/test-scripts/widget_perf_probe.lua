@@ -45,6 +45,24 @@ local TOP_N      = 16   -- timers reported, by share of wall clock
 -- through SPRING_DIAG_CELLS, which does not go through Lua at all.
 local DISABLE_AFTER = 0
 
+-- 1 to send the starting unit to the middle of the map and have the camera
+-- follow it, instead of pausing. install-probe.sh --move sets it.
+--
+-- This is for hunting artefacts, not for measuring. A frozen scene reads to 2.5%
+-- between intervals and a live one varies by a factor of two, so a frame rate
+-- taken in this mode means nothing. What it buys is a scene that a frozen one
+-- cannot produce: a moving unit, command line and waypoint overlays, and line of
+-- sight sweeping across new ground, which is where the engine's own world-space
+-- drawing actually gets exercised.
+--
+-- It also removes a dependency on the faction. A locked camera frames whatever
+-- the commander's start position happens to be, and different factions start
+-- differently, so tracking is what makes two runs comparable by eye.
+--
+-- Tracking is engine state, like pause, so it survives "luaui disable" and the
+-- unit keeps walking on its queued order after every widget is gone.
+local MOVE_AND_TRACK = 0
+
 local lockedCam  = nil
 local frozenAt   = nil
 local disabled   = false
@@ -66,12 +84,42 @@ local function sceneSummary()
 	return string.format("units=%d view=%dx%d", #units, vsx or 0, vsy or 0)
 end
 
+-- Ordered rather than paused. The unit walks to the middle of the map and the
+-- camera follows it, which draws the move line, the waypoint marker and a moving
+-- line of sight, none of which a frozen scene ever shows.
+local function startMoveAndTrack(f)
+	local units = Spring.GetAllUnits() or {}
+	local unitID = units[1]
+
+	if unitID == nil then
+		Spring.Echo("[probe] no unit to move, falling back to a frozen scene")
+		lockedCam = Spring.GetCameraState()
+		Spring.SendCommands("pause 1")
+		return
+	end
+
+	local x = Game.mapSizeX * 0.5
+	local z = Game.mapSizeZ * 0.5
+	local y = Spring.GetGroundHeight(x, z) or 0
+
+	Spring.SelectUnitArray({ unitID })
+	Spring.GiveOrderToUnit(unitID, CMD.MOVE, { x, y, z }, {})
+
+	-- "on" with an explicit id rather than the bare toggle, so this does not
+	-- depend on what happens to be selected and cannot turn tracking back off.
+	Spring.SendCommands("track on " .. unitID)
+
+	Spring.Echo(string.format("[probe] unit %d ordered to %d,%d and tracked at sim frame %d, %s",
+		unitID, x, z, f, sceneSummary()))
+end
+
 function widget:Initialize()
 	-- Profiler on, overlay off. The overlay is itself a per-frame draw cost and
 	-- would be measuring the measurement.
 	Spring.SendCommands("debug 1 0")
 	lastReport = Spring.GetTimer()
-	Spring.Echo("[probe] profiler enabled, freezing at sim frame " .. LOCK_FRAME)
+	Spring.Echo(string.format("[probe] profiler enabled, at sim frame %d will %s",
+		LOCK_FRAME, (MOVE_AND_TRACK > 0) and "move the unit and track it, frame rates are void in this mode" or "freeze the scene"))
 end
 
 function widget:GameFrame(f)
@@ -79,10 +127,15 @@ function widget:GameFrame(f)
 		return
 	end
 
-	lockedCam = Spring.GetCameraState()
 	frozenAt = Spring.GetTimer()
-	Spring.SendCommands("pause 1")
-	Spring.Echo(string.format("[probe] scene frozen at sim frame %d, %s", f, sceneSummary()))
+
+	if MOVE_AND_TRACK > 0 then
+		startMoveAndTrack(f)
+	else
+		lockedCam = Spring.GetCameraState()
+		Spring.SendCommands("pause 1")
+		Spring.Echo(string.format("[probe] scene frozen at sim frame %d, %s", f, sceneSummary()))
+	end
 
 	if DISABLE_AFTER > 0 then
 		Spring.Echo(string.format("[probe] luaui disable scheduled for %ds after the freeze", DISABLE_AFTER))
