@@ -565,6 +565,11 @@ void glBeginBatch(GLenum mode)
 	if (!globalRendering->supportImmediateModeBatching && wantFlush && !noBatchFlush)
 		glFlush();
 
+	// TEMP diagnostic, not for merge. Counted unconditionally, because the
+	// question is how many batches a frame issues at all, not how many a switch
+	// changes.
+	DiagSwitches::batches++;
+
 	glBegin(mode);
 }
 

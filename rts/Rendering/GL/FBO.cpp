@@ -15,6 +15,7 @@
 
 #include "System/Misc/TracyDefs.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/GL/DiagSwitches.h"
 
 CONFIG(bool, AtiSwapRBFix).defaultValue(false);
 
@@ -312,6 +313,14 @@ bool FBO::IsValid() const
 void FBO::Bind()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// TEMP diagnostic, not for merge. A tiler pays for a render pass break at the
+	// cost of storing and reloading the whole attachment, measured at 0.266ms for
+	// this drawable, so the number of binds a frame is the other half of the
+	// render-pass model. Counted here only, so it is FBO binds and not every
+	// glBindFramebufferEXT in the tree.
+	DiagSwitches::fboBinds++;
+
 	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fboId);
 }
 

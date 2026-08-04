@@ -39,6 +39,20 @@ namespace DiagSwitches {
 
 	inline bool On(Switch s) { return (currentMask & (1u << s)) != 0u; }
 
+	// Counters, reported per cell beside the frame rate.
+	//
+	// Why counting rather than another A/B: the game's LuaUI costs 49ms a frame in
+	// SplinterFaction and 96ms in Metal Factions, and all Lua drawing on this path
+	// is immediate mode, so the obvious suspect is the sheer number of glBegin
+	// batches Zink has to turn into uploads and draws. A count needs no comparison
+	// and no statistics to be believed, unlike every switch above it.
+	//
+	// Incremented directly rather than through a call because the vertex counter
+	// sits on the hot path for every vertex Lua draws.
+	extern unsigned long long batches;    // glBeginBatch calls
+	extern unsigned long long luaVerts;   // vertices drawn through LuaOpenGL
+	extern unsigned long long fboBinds;   // FBO binds through the FBO class
+
 	// Call once per present. Advances the schedule and logs the cell that ended.
 	// gpuMillis is the frame's GPU time, or negative when it is not available.
 	void FramePresented(double gpuMillis);

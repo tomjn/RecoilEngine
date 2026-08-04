@@ -145,6 +145,10 @@ namespace {
 // variable. Both together would let one stale variable contaminate every cell.
 unsigned int DiagSwitches::currentMask = haveSchedule ? cells[0].mask : EnvMask();
 
+unsigned long long DiagSwitches::batches = 0;
+unsigned long long DiagSwitches::luaVerts = 0;
+unsigned long long DiagSwitches::fboBinds = 0;
+
 const char* DiagSwitches::CellName()
 {
 	if (cells.empty())
@@ -193,13 +197,23 @@ void DiagSwitches::FramePresented(double gpuMillis)
 
 	// gpu= is the mean of the frame's own GL timestamp pair, so it is the GPU's
 	// time to draw the frame rather than the CPU's time waiting for it.
-	LOG("[diag] cycle=%u cell=%s fps=%.2f frames=%u over %.2fs gpu=%.2fms n=%u",
+	//
+	// The counters are per frame rather than totals, because what the immediate
+	// mode question needs is how much a frame issues, and because a total would
+	// grow with the cell length and read differently for no reason.
+	LOG("[diag] cycle=%u cell=%s fps=%.2f frames=%u over %.2fs gpu=%.2fms n=%u batches/f=%.0f luaverts/f=%.0f fbobinds/f=%.1f",
 		cycle, cells[cellIdx].label.c_str(), cellFrames / elapsed, cellFrames, elapsed,
-		(gpuSamples > 0) ? (gpuMillisSum / gpuSamples) : -1.0, gpuSamples);
+		(gpuSamples > 0) ? (gpuMillisSum / gpuSamples) : -1.0, gpuSamples,
+		(cellFrames > 0) ? (double(batches) / cellFrames) : -1.0,
+		(cellFrames > 0) ? (double(luaVerts) / cellFrames) : -1.0,
+		(cellFrames > 0) ? (double(fboBinds) / cellFrames) : -1.0);
 
 	cellFrames = 0;
 	gpuSamples = 0;
 	gpuMillisSum = 0.0;
+	batches = 0;
+	luaVerts = 0;
+	fboBinds = 0;
 	cellStart = now;
 
 	if (++cellIdx == cells.size()) {

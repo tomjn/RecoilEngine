@@ -274,6 +274,11 @@ static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 	// run, which costs one masked load on a path that already does a branch.
 	const bool narrow = DiagSwitches::On(DiagSwitches::BATCH_NARROW);
 
+	// TEMP diagnostic, not for merge. Counts what Lua draws, separately from what
+	// the engine draws, which is the whole point: the batches this counts are the
+	// ones "luaui disable" removes.
+	DiagSwitches::luaVerts++;
+
 	// Gated on the measured capability, the same way the flush is, so a driver
 	// that renders batches correctly pays nothing. Widening every vertex to four
 	// floats is cheap but it is on the hot path for all Lua drawing, and no other
