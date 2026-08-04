@@ -1202,11 +1202,41 @@ The control run is formally void on focus, 5 of 45 polls, but the losses start a
 
 **So the bisect that would settle it**, and it is one run: the probe freezes the scene, then issues `luaui disable`. That removes the probe with it, but the freeze survives, because pause is engine state and nothing is left to move the camera, and `SPRING_DIAG_CELLS` logs the frame rate from the engine rather than from Lua. Running Metal Factions or MCL on the same map is the other half, a real game with real units against which SplinterFaction can be judged.
 
+**Settled: it is the game's LuaUI, in two unrelated games, 2026-08-04.** The probe now freezes the scene and then issues `luaui disable` a fixed time later, which removes every widget and the probe with it. The freeze survives, because pause is engine state, and the frame rate keeps coming from `SPRING_DIAG_CELLS`, which does not go through Lua. Each row is one run, with the cycles either side of the switch as the two sides.
+
+| game | LuaUI on | LuaUI off | LuaUI costs | share of frame |
+|---|---|---|---|---|
+| SplinterFaction 0.1.78 | 15.21 fps, 65.7ms | 59.60 fps, 16.8ms | 48.9ms | 74% |
+| Metal Factions v2.58 | 8.97 fps, 111.5ms | 63.17 fps, 15.8ms | 95.7ms | 86% |
+| Empty Mod, which has no LuaUI at all | | 59.15 fps, 16.9ms | | |
+
+**Metal Factions is worse than SplinterFaction, not better.** 111.5ms a frame against 65.7ms, and 86% of it is its own widgets. Its LuaUI has little in common with SplinterFaction's and it has its own faction picker, so this is a genuinely independent second measurement rather than a second look at the same content. That removes the weakness noted in `test-scripts/README.md`, that every LuaUI finding rested on one game.
+
+**The three LuaUI-off figures agree at about 16ms**, which is the check that they mean anything. With the widgets gone all three draw the same map and at most one unit, so they should agree, and they do.
+
+**What survives the switch, and why the split is clean.** `cus_gl4.lua` and `api_pbr_enabler.lua` are LuaRules gadgets, so unit materials and PBR are still in place afterwards. What goes is the interface plus the full-screen effect widgets, `gfx_deferred_rendering.lua`, `gfx_bloom_shader_deferred.lua`, `gfx_outline_shader.lua`, `gfx_guishader.lua` and `gfx_light_effects.lua`.
+
+**The scene is now proved rather than inferred.** `install-probe.sh --shots 25,60,90` installs a LuaRules gadget that calls the engine's screenshot action at fixed times. A gadget rather than a widget because the frame that most needs proving is the one after `luaui disable`, and no widget survives it. The Metal Factions shots show the game running properly at its own reported `FPS: 9` with an AVEN commander, and then the same terrain and the same selected commander with the engine's own build menu in place of the game's. That is the check that the false 2.5x of the feature sweep would have failed.
+
+**Driving the screenshot from outside the engine does not work.** A synthetic `Ctrl+Alt+S` through System Events, against a `uikeys.txt` binding, produced no files at all, and the log could not say whether the binding failed to parse, the keystroke never arrived or macOS ate it. It depended on an accessibility grant, the keyboard layout and macOS not claiming the combination. The gadget depends on nothing outside the engine. Do not revisit the keystroke route.
+
+**`VSync` was reaching nothing at all on this path, fixed 2026-08-04.** The setting is applied through `SDL_GL_SetSwapInterval`, and SDL owns neither the context nor the present here, which `GlobalRendering.cpp:892` already recorded. A `CAMetalLayer` synchronises with the display by default, so the engine was pinned to the refresh rate whatever the config said. `CVerticalSync::SetInterval` now calls `MacMetalPresent_SetVSync`, and both `MacMetalPresent_Init` and the setter log the state so it cannot apply silently. This never showed on the built-in panel because nothing ever approached 120 fps.
+
+**A 60Hz display is not a ceiling, and the claim that it was is retracted.** Three workloads reading 59.15, 59.60 and 63.17 fps looked like the refresh interval showing through, and it is not. Empty Mod in a quarter-size window runs at **103.4 fps** on the same display with display sync off. Those three agree because they genuinely cost about 16ms each.
+
+**But the display does change the constant.** Empty Mod costs 16.9ms on the external 5120x2880 panel against 12.5ms on the built-in one, same engine, same map, same window in pixels. Fitting the two window sizes on the external display gives **7.3ms fixed plus 1.74ms a Mpixel**, so most of the engine's own frame at this window size is fixed cost rather than fill. Absolute figures from before 2026-08-04 were taken on the built-in panel and are not comparable with anything after it.
+
+**Immediate mode is the live hypothesis for where the LuaUI time goes, untested.** All Lua drawing is real immediate mode on this path: `LuaOpenGL.cpp:285` puts every vertex through `glVertex4f` and `myGL.cpp:568` wraps `glBegin`. Zink has to turn each batch into a buffer upload and a draw, and the flush A/B above already showed immediate-mode batches costing 7.5% of the frame on SplinterFaction, which was read as about 18 batches a frame. That reading assumed one pass break a batch, so it bounds the batch count and not the cost of immediate mode itself.
+
+**The cheap test is a counter, not another A/B.** Count `glBeginBatch` calls and vertices per frame and log them per cell, the same way the plan already proposes counting `glBindFramebuffer`. Tens of thousands of batches a frame would settle it. Twenty would kill it. Note that "the CPU is idle" is not evidence against this, because a main thread blocked waiting on the GPU looks idle whatever the driver thread is doing, and that has never been checked separately.
+
 **Start here next, in this order.**
 
-1. **`luaui disable` after the freeze**, as above. Splits the missing 50ms into the game's interface and effects against its unit materials. One run.
-2. **Spawn a fixed set of units from a gadget**, so a scene is a known quantity rather than whatever the game's own spawn logic left behind. Every frame rate in this document was measured with `units=1`, which is not representative of play, and the same gadget in two games makes them comparable for the first time. Note Empty Mod cannot host it without unit definitions, so this belongs in a game that has them, or in a loose `LuaRules/main.lua` in the data dir, which is known to load because `LuaIntro/main.lua` does.
-3. **Metal Factions or MCL on the same map.** Neither has ever been started on this renderer, which section 2b lists as unverified, so this tests two things at once.
+1. **Count immediate-mode batches and vertices per frame**, logged per cell alongside the frame rate. This is the one test that would confirm or kill the immediate-mode hypothesis above, it needs no A/B, and Metal Factions gives it a 95.7ms signal to work against rather than SplinterFaction's 48.9ms. Count `glBindFramebuffer` in the same pass, since the render-pass model predicts both.
+2. **Find which widgets cost the time.** `luaui disable` is all or nothing across 167 widgets in SplinterFaction and 69 in Metal Factions. The full-screen effect widgets are the obvious suspects and can be removed individually, which is a bisect rather than a single number.
+3. **Spawn a fixed set of units from a gadget.** Every frame rate in this document was measured with `units=1`, which is not representative of play. The same gadget in two games makes them comparable for the first time. Empty Mod cannot host it without unit definitions, so it belongs in a game that has them.
+
+**Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not.
 
 Not worth retrying, all measured: the present path, cheaper CPU-side drawing, raw fill, render scaling, `MacHiDPIRendering = 0`, and the engine feature sweep.
 
