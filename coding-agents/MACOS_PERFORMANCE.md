@@ -240,9 +240,11 @@ The difference is not geometry. Neither a horizontal shift nor a horizontal scal
 
 `DrawPanel` in `gui_static_buildordermenu.lua` lays a black overlay at `ui_opacity`, which is 0.7 in both runs, so each application leaves 0.3 of what is behind it. Two applications leave 0.09. The ratio 0.3 against 0.09 is 3.33, and both samples fit it at very different background values.
 
-So the deferred path applies that overlay twice and the compiled path applies it once. Which is correct is unresolved, and the uncomfortable reading is that compiled lists render what the widget asks for while the deferral, which exists only on this branch, has been darkening the UI since it was written. The output is stable frame to frame either way, 2.2 differing pixels between two frames against 2.9 for the deferred path, so nothing is replaying stale buffer contents.
+A ratio of 3.33 is what one extra application of that overlay would give, but the widget does not do that in either path. `DrawPanel` is called from inside the two `gl.CreateList` closures and nowhere else, each list is called once a frame, and the deferred `gl.CallList` runs its closure exactly once at `LuaOpenGL.cpp:6613`. So the arithmetic fits a mechanism the code rules out, and the real one is still unknown.
 
-Next step is a minimal reproduction rather than more reading of a 1,434 line widget: one throwaway widget that draws the same rectangle twice, once through a compiled list and once directly, and a pixel comparison of the two.
+What is established: geometry is identical, the difference is in blending, the compiled side is lighter by about 3.3x in dark areas, and both sides are stable frame to frame, 2.2 differing pixels between two frames against 2.9 for the deferred path. Nothing is replaying stale buffer contents.
+
+Next step is a minimal reproduction rather than more reading of a 1,434 line widget: one throwaway widget that draws the same rectangle twice, once through a compiled list and once directly, and a pixel comparison of the two. That separates the engine's list handling from anything this widget does.
 
 ### Rendering is unchanged by buffering, tested 2026-08-26
 

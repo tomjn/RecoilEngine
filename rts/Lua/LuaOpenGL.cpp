@@ -6510,9 +6510,8 @@ int LuaOpenGL::CreateList(lua_State* L)
 	//
 	// Buffering removes the reason written above, but not the deferral. Compiling
 	// with buffering on measured 31.29 fps against 16.97 deferred, and drew the
-	// build menu lighter. Geometry is identical, so it is a blend difference, and
-	// the ratio says the deferred path lays the panel's overlay down twice where
-	// the compiled path lays it once. Which of those is correct is unresolved.
+	// build menu lighter. Geometry is identical, so it is a blend difference of
+	// about 3.3x in dark areas, and the mechanism is not yet known.
 	if (!globalRendering->supportImmediateModeBatching) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
