@@ -26,8 +26,10 @@ Last updated 2026-08-26. Companion to `MACOS_RENDERER_PLAN.md`, which holds the 
 | Is render scaling a way out? | No, flat 38ms penalty for any non-1:1 present | 6 runs |
 | Are render pass breaks the problem? | Probably not. Model demoted | `rp` found nothing |
 | Is it the engine's fault? | Mostly no. Empty Mod runs at 80 fps | Measured |
-| What is the one big engine-side fix? | Make `LuaOpenGL` stop using `glBegin` | Started 2026-08-26 |
+| What is the one big engine-side fix? | Not `glBegin` after all. It is the display list deferral | Measured 2026-08-26 |
 | Would a buffered draw hit the same driver defect? | No. `glDrawArrays` is clean over 60,000 pairs | Measured, with a control |
+| What did buffering Lua actually buy? | 5.7%, cleanly separated but small | 2 runs a side |
+| What is the deferral costing? | 1.84x, and compiled lists still break the build menu | 1 run, large effect |
 
 **Headline numbers**, Splinter Faction, 3024x1832, built-in display:
 
@@ -211,6 +213,38 @@ A run peaks near 8 GiB on 16 GB of RAM. A leaking driver reaches 54 GB and freez
 ---
 
 ## Evidence
+
+### Lua buffering measured, and where the rest of the win is, 2026-08-26
+
+**All figures on the external 4K panel, so they do not compare to anything above.** Mesa `56588ef0665`, SplinterFaction, frozen scene, 3024x1832 backing, `SPRING_FPS_LOG=5`, mean of the last six samples a run.
+
+| Configuration | fps | frame | Runs |
+|---|---|---|---|
+| `LuaImmediateModeBuffering = 0`, the old path | 16.06 | 62.3ms | 2 |
+| `LuaImmediateModeBuffering = 1` | 16.97 | 58.9ms | 2 |
+| buffering on, plus compiled display lists | 31.29 | 32.0ms | 1 |
+| buffering on, plus `ForceImmediateModeFlush = 0` | 31.35 | 31.9ms | 1 |
+
+Buffering alone is worth 5.7%, with every buffered sample above every legacy sample, 16.46 to 17.73 against 15.36 to 16.31. A clean separation of a small effect.
+
+**The display list deferral, not the flush, is the rest.** Compiling lists reaches 31.29 and `ForceImmediateModeFlush = 0` reaches 31.35, and the second of those turns off the deferral as well. So the engine's own 40 `glBeginBatch` callers, 28 of them in `GuiHandler.cpp`, are not where the remaining time goes. The deferral is worth 1.84x on its own.
+
+**Compiled lists still cannot ship, for a new reason.** With buffering on they no longer merge batches, but the build menu renders horizontally compressed. Measured on the menu region, 39,082 differing pixels of 450,000 against a same-configuration noise floor of 25. No horizontal shift improves the match, so it is a scale rather than an offset, which points at a projection baked in at compile time rather than at anything to do with batching. Reverted, and worth chasing on its own.
+
+### Rendering is unchanged by buffering, tested 2026-08-26
+
+The gate for the rewrite. Screenshots at 20s and 40s into a frozen scene, compared with `compare -metric AE`.
+
+| Comparison | Whole screen | Build menu region |
+|---|---|---|
+| same configuration, two runs | 30,950 | 25 |
+| buffered against the old path | 30,672 | 50 |
+
+Out of 5.5M and 450,000 pixels. The cross-configuration difference is smaller than the run-to-run difference, so buffering is indistinguishable from the old path at the resolution this harness can measure.
+
+The noise floor is the profiler text and the unit animating, both of which differ between any two runs. The build menu column is the tighter test, because it is static UI drawn through `gl.BeginEnd`, and there buffering moves 50 pixels against a floor of 25.
+
+This does not prove pixel identity. It proves any difference is below about 0.01% on static UI.
 
 ### `glDrawArrays` does not merge, tested 2026-08-26
 

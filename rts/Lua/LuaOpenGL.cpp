@@ -6507,6 +6507,11 @@ int LuaOpenGL::CreateList(lua_State* L)
 	// the list, so glBeginBatch cannot help a batch that is baked into one, and
 	// neither can any flush at replay time. Keep the function instead and run it
 	// live on every gl.CallList, which is the path the mitigation does reach.
+	//
+	// Buffering does not remove the reason, though it removes the one that was
+	// written here. Compiling with buffering on was measured at 31.29 fps against
+	// 16.97 deferred, and it renders the build menu horizontally compressed, which
+	// is a baked projection rather than a merged batch. Worth chasing separately.
 	if (!globalRendering->supportImmediateModeBatching) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
