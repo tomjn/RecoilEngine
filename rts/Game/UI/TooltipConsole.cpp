@@ -71,7 +71,7 @@ void CTooltipConsole::Draw()
 
 	if (!outFont) {
 		glColor4f(0.2f, 0.2f, 0.2f, CInputReceiver::guiAlpha);
-		glRectf(x, y, (x + w), (y + h));
+		glRectBatch(x, y, (x + w), (y + h));
 	}
 
 	const float fontSize   = (h * globalRendering->viewSizeY) * (smallFont->GetLineHeight() / 5.75f);

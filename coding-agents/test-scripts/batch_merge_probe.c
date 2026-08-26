@@ -487,6 +487,18 @@ int main(int argc, char** argv)
 	compare("rectf then immediate, flush (ref)", MODE_IMMEDIATE, SEP_FLUSH, iterations);
 	compare("rectf then arrays, no separator",   MODE_ARRAYS,    SEP_NONE, iterations);
 	compare("rectf then arrays, flush",          MODE_ARRAYS,    SEP_FLUSH, iterations);
+
+	// Does a plain state change between them do the job a flush does? Engine code
+	// always sets some state before LuaUI draws, so if this is clean the 17
+	// glRectf sites in the engine need nothing.
+	recolourEachBatch = 1;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	compare("rectf, colour, immediate (ref)",    MODE_IMMEDIATE, SEP_FLUSH, iterations);
+	compare("rectf, colour, then arrays",        MODE_ARRAYS,    SEP_NONE, iterations);
+	recolourEachBatch = 0;
+
 	rectfFirstBatch = 0;
 	primType = GL_LINE_LOOP;
 

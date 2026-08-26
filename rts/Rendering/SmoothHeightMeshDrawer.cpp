@@ -65,7 +65,7 @@ void SmoothHeightMeshDrawer::DrawInMiniMap()
 		if (changed){
 			const float x = (i % mapChangeTrack.width) * tileSize;
 			const float y = (i / mapChangeTrack.width) * tileSize;
-			glRectf(x, y, x + tileSize, y + tileSize);
+			glRectBatch(x, y, x + tileSize, y + tileSize);
 		}
 		i++;
 	}

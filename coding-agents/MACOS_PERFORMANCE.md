@@ -277,6 +277,14 @@ Also worth noting from the same run: `GL_QUADS` immediate mode with no separator
 
 The fix routes `gl.Rect` through the accumulator instead of adding another flush, which removes the mixture rather than paying for it.
 
+**The engine's own 17 `glRectf` calls need the same treatment, and this part is not about buffering.** `CVertexArray` already emits `glDrawArrays` and is used by `glExtra.cpp`, `GrassDrawer` and `AdvWater`, so an engine `glRectf` followed by one of those hits the same defect with no Lua involved. `HAPFSPathDrawer` contains both. That makes it a latent bug on this branch that buffering widened rather than created, though it has not been demonstrated in a running frame.
+
+`glRectBatch` in `myGL` wraps them, flushing after rather than before. `glBeginBatch` separates itself from what precedes it, which suffices when its neighbours are also immediate mode. `glRectf` has to separate itself from what follows, because there is nothing on that side to do it.
+
+Measured at 17.16 fps against 16.97 without the wrapper, so the flushes cost nothing detectable. A first attempt read 14.04 and was wrong: a 45 second run compared against 70 second runs, with a pre-freeze loading sample in the mean.
+
+`glBeginBatch` needs no equivalent change. `glBegin` followed by `glDrawArrays` is clean 30 of 30 in the same probe, so the defect is specific to `glRectf`.
+
 **How it was found, because the method mattered more than the result.** It presented as a display list bug for hours. A widget drawing one figure twice a frame, once through a list and once directly, showed the list copy losing its first two batches. Drawing the direct copy first moved the artefact to the direct copy, which proved it followed draw order and had nothing to do with lists.
 
 Three false readings came before that, all from a flat backdrop:

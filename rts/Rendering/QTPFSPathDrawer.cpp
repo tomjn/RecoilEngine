@@ -494,7 +494,7 @@ void QTPFSPathDrawer::DrawInMiniMap()
 		const int blockIdxY = (i / width) * blockSize;
 		const float drawStrength = 0.2f + 0.55f*(mapDamageStrength[i] / maxStrength);
 		glColor4f(1.0f, 1.0f, 0.0f, drawStrength);
-		glRectf(blockIdxX, blockIdxY, blockIdxX + blockSize, blockIdxY + blockSize);
+		glRectBatch(blockIdxX, blockIdxY, blockIdxX + blockSize, blockIdxY + blockSize);
 	}
 
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);

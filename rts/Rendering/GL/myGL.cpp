@@ -573,6 +573,18 @@ void glBeginBatch(GLenum mode)
 	glBegin(mode);
 }
 
+void glRectBatch(float x1, float y1, float x2, float y2)
+{
+	glRectf(x1, y1, x2, y2);
+
+	// After, not before. glBeginBatch separates itself from what precedes it,
+	// which is enough when the neighbours are also immediate mode. This one has to
+	// separate itself from what follows, because a glDrawArrays after a glRectf
+	// loses its geometry and there is nothing on that side to do it.
+	if (!globalRendering->supportImmediateModeBatching)
+		glFlush();
+}
+
 void ClearScreen()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
