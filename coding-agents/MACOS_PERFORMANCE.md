@@ -28,8 +28,10 @@ Last updated 2026-08-26. Companion to `MACOS_RENDERER_PLAN.md`, which holds the 
 | Is it the engine's fault? | Mostly no. Empty Mod runs at 80 fps | Measured |
 | What is the one big engine-side fix? | Nothing large is left that does not cost correctness | Measured 2026-08-26 |
 | Would a buffered draw hit the same driver defect? | No. `glDrawArrays` is clean over 60,000 pairs | Measured, with a control |
+| What causes the display list wedge? | Replaying a textured list beside live draws. Not compiling, not buffer reuse | Reproduced offline, 20 of 20 |
+| Can compiled lists ship now? | Yes. A flush around `glCallList` fixes it. Now the default | Confirmed in game, 2026-08-26 |
 | What did buffering Lua actually buy? | 5.7%, cleanly separated but small | 2 runs a side |
-| What does the deferral cost? | 1.84x, and it is buying correct output, not wasting it | 1 run, large effect |
+| What does the deferral cost? | 2.09x, and it was buying nothing. Removed | 16.3 vs 34.1 fps, same scene |
 
 **Headline numbers**, Splinter Faction, 3024x1832, built-in display:
 
@@ -47,7 +49,7 @@ Last updated 2026-08-26. Companion to `MACOS_RENDERER_PLAN.md`, which holds the 
 - **The mechanism is immediate mode.** All Lua drawing goes through `glVertex4f` one vertex at a time (`LuaOpenGL.cpp:313`, `myGL.cpp:573`). 790,748 Lua vertices a frame on Metal Factions.
 - **The renderer's own floor is fine.** 2.3ms a Mpixel with no game content. The often-quoted 11.3ms a Mpixel is Splinter Faction's scene, not a property of this port.
 - **The driver has a real defect on top.** KosmicKrisp mis-renders consecutive immediate-mode batches. The engine works around it with uniform vertex and texture coordinate arity, a per-batch `glFlush`, and display list deferral. That costs 1.87x and is deliberate.
-- **The workarounds cannot cover everything.** 47 widgets compile immediate mode into display lists, where `glFlush` is never recorded and nothing at replay can reach the baked batches.
+- **The workarounds now cover display lists too.** 47 widgets compile drawing into display lists. A `glFlush` cannot be recorded into a list, which was long read as meaning nothing could reach a baked batch. That was wrong. The fault was never in the baked batch, it was in replaying a textured list beside live drawing, and a flush either side of `glCallList` reaches it. The deferral is gone and lists compile by default.
 
 Everything above points at one fix, and the plan reaches it twice independently: `LuaOpenGL` should not use `glBegin` at all.
 
@@ -68,9 +70,11 @@ Each of these was measured. Reopening one needs new information, not a new idea.
 | 60Hz display as a ceiling | It is not | `PLAN:1225` |
 | Buffering, 1 vs 2 IOSurfaces | 15.9 vs 16.1 fps | `ab-doublebuf-*.log` |
 | `ZINK_DEBUG=rp` renderpass tracking | No signal, p = 0.167 | Below, 2026-08-25 |
-| Compiled display lists | Cannot ship, build menu destroyed | `PLAN:1299` |
+| Compiled display lists | **Superseded.** They ship now. The cause was found and fixed, see below | `PLAN:1299`, then 2026-08-26 |
 | `ForceImmediateModeFlush = 0` | Not a lever. It is the price of correct output | Below, 2026-08-25 |
 | `normalise` as a default | No. Reintroduces merging on top of the flush | `PLAN:1261` |
+| `glDrawArrays` inside a display list | Clean in 10 arrangements, including a deliberately overwritten shared buffer | Below, 2026-08-26 |
+| The wedge is a smear of map texture | No. It is a UI rectangle with a flung vertex | Below, 2026-08-26 |
 
 ### The two that keep getting reopened
 
@@ -82,7 +86,7 @@ Each of these was measured. Reopening one needs new information, not a new idea.
 | `LuaOpenGL.cpp:273` | texcoord arity widening | resource bar |
 | `LuaOpenGL.cpp:295` | multi-texcoord arity widening | same family |
 | `myGL.cpp:570` | per-batch `glFlush` | consecutive batches merging |
-| `LuaOpenGL.cpp:6217` | display list deferral | flush cannot be recorded into a list |
+| `LuaOpenGL::CallList` | `glFlush` either side of `glCallList` | textured list replay corrupting live draws |
 
 Worth 1.87x and 1.65 GB. Also reverts every artefact this project has fixed.
 
@@ -324,6 +328,92 @@ The positive control reproduces the published figure, 27 of 30 frames against 31
 The last row is a null result, not a refutation. The arity defect was found on the load screen with textures bound, which this probe does not set up.
 
 A first attempt at this probe drew 4-vertex squares 10 pixels apart and found nothing, including nothing from the positive control. The spacing is what makes a merge visible: the amplifier puts circles 22 pixels apart so the connecting segment cannot be confused with the shapes.
+
+### Display lists are not the wedge's mechanism, tested 2026-08-26
+
+The wedge is the artefact that appears when `gl.CreateList` is allowed to compile, and it is what keeps the deferral in place. The leading hypothesis was that `IssueBatch` hands `glDrawArrays` a pointer into a vector `LuaImmediateBatch` clears and refills, and that Mesa keeps the pointer rather than dereferencing it at compile time.
+
+**It does not.** `batch_merge_probe.c` grew a display list mode and the hypothesis died on the first run. Every case below is 0 dirty frames of 10, Mesa `56588ef0665`, same 2000 batch grid as the section above.
+
+| Case | Dirty frames |
+|---|---|
+| list, immediate | 0 of 10 |
+| list, arrays, own array a batch | 0 of 10 |
+| list, arrays, reused buffer | 0 of 10 |
+| list, arrays, own array, buffer overwritten before replay | 0 of 10 |
+| **list, arrays, reused buffer, buffer overwritten before replay** | **0 of 10** |
+| every batch from its own list | 0 of 10 |
+| lists and direct draws alternating | 0 of 10 |
+| list, arrays, varying pointer size | 0 of 10 |
+| list and direct, with a texcoord array bound | 0 of 10 |
+| quads, list, texcoords | 0 of 10 |
+
+The bold row is the one that settles it. The shared buffer is overwritten with a ring at 0.9 NDC between `glEndList` and `glCallList`, so a driver holding the pointer would replay a screen-sized ring over 2000 seven pixel circles. It replayed the circles. Mesa dereferences at compile time, as the specification requires. The list also replayed with 0 missing pixels, so it genuinely compiled and executed all 2000 draws rather than compiling to nothing.
+
+Two further results came out of the same run:
+
+**A flush fixes the varying pointer size defect.** 10 of 10 dirty without a separator, 0 of 10 with one. So it is the same separator-class defect as batch merging, not a separate fault.
+
+**A display list is immune to the varying pointer size defect.** Compiling alternating size 2 and size 4 draws into one list and replaying it is clean, because compilation bakes the arrays into one internal format and there is no size change left to get wrong. This is the opposite of what was expected: a list cannot record a `glFlush`, so lists looked like the one place a separator could never reach.
+
+Do not spend another session on "the driver mishandles `glDrawArrays` inside a display list". It handles every arrangement the probe can express.
+
+### The wedge found: textured list replays beside live draws, 2026-08-26
+
+The section above is the five dead ends. This is the cause, reproduced offline in the same probe once it was given the one ingredient it had never had: a texture coordinate array.
+
+**A display list replay that contains a textured `glDrawArrays` corrupts the frame when live client array draws are interleaved with the replays.**
+
+| Case | Dirty frames | Extra pixels |
+|---|---|---|
+| every batch from a list, textured | 0 of 20 | 0 |
+| all live drawing, textured | 0 of 10 | 0 |
+| lists and live draws mixed, untextured | 0 of 10 | 0 |
+| **lists and live draws mixed, textured** | **20 of 20** | **13,138,920** |
+| mixed textured, texcoord pointer rebound each draw | 20 of 20 | 13,138,920 |
+| mixed textured, flush around `glCallList` | 0 of 20 | 0 |
+| mixed textured, flush between every draw | 0 of 20 | 0 |
+| mixed textured, finish between every draw | 0 of 20 | 0 |
+
+657,000 wrong pixels a frame on a 1,152,000 pixel surface, 57% of the frame. The lists in that table are compiled once, before the loop, and only replayed inside it, so compiling is not involved. It is replay.
+
+Three ingredients, and every one is needed:
+
+- a display list containing `glDrawArrays`
+- a texture coordinate array bound when it was compiled
+- live client array draws interleaved with the replays
+
+Drop any one and it is clean. That is why the deferral hides it completely: a deferred list runs its function live, so there is no replay to interleave with anything.
+
+**The fix is a `glFlush` either side of `glCallList`**, which is clean 0 of 20 and is the one placement `LuaOpenGL::CallList` can implement. Rebinding the array pointers before each draw changes nothing, 20 of 20 dirty, so this is a synchronisation fault rather than stale client array state. It is far cheaper than the per-batch flush in `glBeginBatch`, because a frame has thousands of batches and tens of list replays.
+
+**Confirmed in game 2026-08-26.** A human drove Splinter Faction with lists compiling and the flush in, ran all three triggers that reproduced the wedge before, and saw no artefacts. Compiled lists are now the default, `LuaDisplayListMode = 1`.
+
+Measured Splinter Faction, fixed start, 1400x850 window, 10 second samples:
+
+| Configuration | fps |
+|---|---|
+| `LuaDisplayListMode = 0`, deferred, the old default | 16.1, 16.3, 16.5, 16.3, 16.3 |
+| default, compiled, with the flush | 34.1, 34.3, 34.3, 34.3, 33.1 |
+
+2.09x. Not comparable to the 1.82x quoted before this work, which was measured at 3024x1832.
+
+An earlier run of the same compiled configuration gave 22.7 to 30.5 and was much noisier. The cause of that spread was not chased. Both runs beat the deferred figure by a wide margin, so the direction is not in question, but a careful A/B is still owed if the exact multiplier matters.
+
+**Why it looks like a wedge.** `gui_options.lua` and `gui_tooltip.lua` draw every panel with `RectRound`, which is `gl.BeginEnd(GL.QUADS, ...)` with `bgcorner` bound, so all UI panel drawing is textured. Corrupting one vertex of a rounded rectangle leaves the rest in place, which draws a quad stretched from an apex. Many such rectangles sharing an apex is the fan of thin lines. The dark fill and the thin coloured line along the hypotenuse in the screenshots are a panel's own fill and border.
+
+**Why the triggers are what they are.** Hovering a slider calls `WG['tooltip'].ShowTooltip` at `gui_options.lua:1000` and a checkbox never does. Selecting a unit and placing a building both raise tooltips too. The tooltip widget replays a list while other widgets draw live, which is the mixture above. Scrolling the widget list only recompiles, and compiling alone is clean, which is why a human scrolled without seeing anything.
+
+**What the probe still cannot see.** No matrices, no shaders, no actual bound texture, no depth, no framebuffer changes. The exact driver mechanism is not established. Changing the texcoord array contents changes the wrecked geometry, so texcoord data reaches position somehow, but the geometry does not track the texcoord values one for one, so "position is read from the texcoord array" is not supported and is not claimed here.
+
+**What the artefact actually is**, from screenshots a human took on 2026-08-26 in `~/dev/spring-testdata/artefacts/2026-08-26-display-list-wedge/`. Earlier readings called it a smear of map texture. It is not. It is a dark panel fill with a thin coloured border running the full length of its hypotenuse, which is a UI rectangle drawn with a vertex flung away, and the fan of thin lines is many such rectangles sharing one bad apex. Corrections from the human that narrow it further:
+
+- Scrolling the widget list produced no artefact in the session the screenshots came from, so list recompilation on its own is not the trigger
+- The build menu widget drew correctly throughout, so this is not the build menu defect recorded above, which is a separate fault
+- The wedge draws above the GUI and below the cursor and the tooltip, which pins the corrupted draw to a slot late in `DrawScreen`
+- Hovering a slider triggers it, hovering a checkbox does not
+
+`LuaDisplayListMode` splits compiling from replaying. 0 defers, 1 compiles and replays, 2 compiles on the same schedule and then discards the replay, running the Lua function live instead. An artefact that survives mode 2 was caused by compiling a list, one that only appears in mode 1 was caused by replaying it. Mode 2 is a diagnostic, not a shipping configuration. The answer below came from the probe rather than from mode 2, so mode 2 was never needed in the end. It stays because the next list fault will want the same split, and because it is the cheapest way to ask "compile or replay" of any future artefact.
 
 ### `ZINK_DEBUG=rp`, tested 2026-08-25, no signal
 
