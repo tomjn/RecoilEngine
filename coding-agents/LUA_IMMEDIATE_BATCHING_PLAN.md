@@ -18,7 +18,7 @@
 - Task 5 passed. Buffering is indistinguishable from the old path, 50 differing pixels on the build menu against a same-configuration floor of 25
 - Task 6 is moot. Buffering already skips the flush and the arity widening, and the engine's own `glBeginBatch` callers turned out not to be where the time goes
 - Task 7 failed. Compiled lists reach 31.29 fps against 16.97, but render the build menu horizontally compressed. Reverted
-- Task 8 done. Buffering is worth 5.7%. The deferral costs 1.84x and that is the price of correct output, not a lever to pull
+- Task 8 done. Buffering is worth 5.7%. ~~The deferral costs 1.84x and that is the price of correct output, not a lever to pull~~ **Wrong, corrected 2026-08-26.** The deferral cost 2.09x and was buying nothing. The fault it worked around was in replaying a list, not in compiling one, and a flush around `glCallList` fixes it. Lists compile by default
 
 Four things the plan did not predict, all fixed or recorded: a colour set in a block that drew nothing was lost, the headless link was missing three vertex array pointer stubs, `Spring.GetProfilerTimeRecord` had two crash bugs that made the probe kill the engine 25 seconds into every run on any branch, and the build menu failure mode for compiled lists is a projection problem rather than a batching one.
 
@@ -1200,11 +1200,13 @@ Once buffering is on, the Lua path emits no `glBegin` batches, so `LuaVertexN`, 
 
 **Check:** `install-probe.sh --loops 2000` then `minimap_score.py <log> --amp` scores 0 dirty frames.
 
-### Task 7: Retire the display list deferral
+### Task 7: Retire the display list deferral. Done 2026-08-26
 
-Remove the deferral at `LuaOpenGL.cpp:6217` and the 8192-list cap, and let `gl.CreateList` compile again.
+Lists compile by default. The deferral survives as `LuaDisplayListMode = 0` and keeps the 8192-list cap with it, because that path still holds a Lua closure per list.
 
-**Check:** scroll the build menu, 0 of 37 frames with damaged content. That is the bar the deferral cleared.
+It did not go the way this task expected. Compiling was never the fault, so the build menu check below was aimed at the wrong thing. Replaying a list holding a textured `glDrawArrays` corrupts the frame when live client array draws are interleaved with the replays, and a `glFlush` either side of `glCallList` fixes it.
+
+~~**Check:** scroll the build menu, 0 of 37 frames with damaged content. That is the bar the deferral cleared.~~ **Not run.** What was checked instead: 0 dirty frames of 20 in `batch_merge_probe.c`, and a human driving the game through the three interactions that reproduced the artefact. The frame count is still owed.
 
 ### Task 8: Measure
 

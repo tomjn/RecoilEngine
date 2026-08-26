@@ -30,7 +30,7 @@ EGL context through Mesa, Metal present, framebuffer sizing, mouse input in fram
 
 ### 3. Driver workarounds, 7 commits
 
-The changes that exist because the driver underneath is Zink on KosmicKrisp rather than a mature desktop GL: the `glPolygonMode(GL_LINE)` fallback, skipping `eglTerminate` on exit, immediate-mode batch detection and routing, and Lua display list replay.
+The changes that exist because the driver underneath is Zink on KosmicKrisp rather than a mature desktop GL: the `glPolygonMode(GL_LINE)` fallback, skipping `eglTerminate` on exit, immediate-mode batch detection and routing, and the flush around `gl.CallList`.
 
 ### 4. Diagnostics, 21 commits
 

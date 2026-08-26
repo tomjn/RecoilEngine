@@ -1,5 +1,13 @@
 # Task: find what draws a screen-filling wedge when Lua display lists are compiled
 
+> **Solved 2026-08-26. Kept as a record of a task brief, not as instructions.**
+>
+> The leading hypothesis below is wrong, and so is the fix it proposes. The driver dereferences `glDrawArrays` array data at compile time exactly as the specification requires, and the reused `LuaImmediateBatch` vector is not involved at all.
+>
+> The cause is replaying a list holding a *textured* `glDrawArrays` while live client array draws are interleaved with the replays. A `glFlush` either side of `glCallList` fixes it. Answer and the five refuted hypotheses in [MACOS_PERFORMANCE.md](../MACOS_PERFORMANCE.md).
+>
+> The two parts of this brief that carried the work were the method section and the instruction to ask a human what they saw. The slider triggering it while checkboxes did not is what found it.
+
 A large dark triangular wedge, filled with a fan of thin lines radiating from a single apex, covers up to half the screen in SplinterFaction. It appears only when `gl.CreateList` is allowed to compile rather than defer. Your job is to find the cause. Fixing it comes after, and only once you can say what it is.
 
 Screenshots: `~/dev/spring-testdata/artefacts/2026-08-26-display-list-wedge/wedge-1.png` through `wedge-6.png`. Look at them before anything else.

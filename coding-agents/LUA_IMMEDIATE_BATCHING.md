@@ -20,7 +20,7 @@ Vertex specification stays fixed-function. That is the design, not a compromise.
 | Vertex pointer size? | Pinned at 4 floats, never varies | Varying it corrupts 30 frames of 30 |
 | Mid-block state changes? | Rejected, as GL already does | Preserves current behaviour |
 | Nested `gl.BeginEnd`? | No-op, joins the outer block | Matches what widgets see today |
-| Display lists? | Separate later change | Reasoned, not yet measured |
+| Display lists? | Done. Compiled again, with a flush around `glCallList` | Measured, 20 frames of 20 |
 | Config gate? | `LuaImmediateModeBuffering`, default 1 | Needed for an interleaved A/B |
 
 ## The accumulator
@@ -85,7 +85,7 @@ Everything else becomes a no-op inside a block, which is what the driver already
 
 Cost is one branch per `gl.*` call.
 
-`gl.Rect` needs no change. It goes through `glRectf` at `LuaOpenGL.cpp:2897` and was never a batch.
+~~`gl.Rect` needs no change. It goes through `glRectf` at `LuaOpenGL.cpp:2897` and was never a batch.~~ **Wrong, and it cost a session.** Never having been a batch is exactly why it broke. `glRectf` never went through `glBeginBatch`, so it never got the flush that separates batches, which went unnoticed while everything after it was also immediate mode and therefore also flushed. Once Lua drawing is buffered, an unseparated `glDrawArrays` follows it and the driver loses the draws that follow: dirty in 30 frames of 30, clean in 30 of 30 with a flush between. `gl.Rect` now emits through the accumulator like everything else, which removes the mixture rather than paying for another flush.
 
 ### Two gaps, accepted and documented
 
@@ -95,13 +95,17 @@ Cost is one branch per `gl.*` call.
 
 Both are rare. Shipping the simplification and writing it down beats building machinery for them.
 
-## Display lists come later
+## Display lists, done 2026-08-26
 
-Buffering should make real compiled lists correct again. `glDrawArrays` is compiled into a list with its data dereferenced at compile time, which is the one thing a flush could never reach, and reaching inside lists is what blocks the 47 widgets that compile immediate mode.
+Buffering did make compiled lists correct again, and the reasoning below was half right in a way worth recording.
 
-That would retire the deferral at `LuaOpenGL.cpp:6217` and the 8192-list cap with it.
+**Right:** `glDrawArrays` is compiled into a list with its data dereferenced at compile time. Measured, including a case that overwrites the shared buffer between `glEndList` and `glCallList` to try to catch the driver holding the pointer. It does not.
 
-It is reasoned, not measured, and last time compiled lists destroyed build menu content in 15 frames of 35. So it lands as its own commit with its own evidence, against the bar the deferral cleared: 0 of 37.
+**Wrong:** that this was the one thing a flush could never reach, and that the remaining risk was the build menu. Neither was the problem. Compiling a list is clean in every arrangement the probe can express. What corrupts the frame is *replaying* a list holding a textured `glDrawArrays` while live client array draws are interleaved with the replays. A `glFlush` either side of `glCallList` reaches it, 20 dirty frames of 20 without and 0 of 20 with.
+
+The deferral is gone and lists compile by default, worth 16.3 fps against 34.1 on Splinter Faction at 1400x850. The 8192-list cap stays, because `LuaDisplayListMode = 0` still reaches the deferred path.
+
+Full account in [MACOS_PERFORMANCE.md](MACOS_PERFORMANCE.md), including the five hypotheses that died first.
 
 ## The config gate
 
@@ -119,7 +123,7 @@ Each step has a check. Do not start the next one until the check passes.
 2. Wire the six `glBeginBatch` sites behind the config. **Check: SplinterFaction starts and draws.**
 3. Prove pixel identity. Frozen scene, `install-probe.sh --shots`, both paths, SplinterFaction and Metal Factions. **Check: the screenshots match.**
 4. Turn off the flush and the arity widening for the Lua path, which are dead once buffering is on. **Check: the `--loops` amplifier scores 0 dirty frames.**
-5. Retire the display list deferral. **Check: build menu scroll, 0 of 37 frames damaged.**
+5. Retire the display list deferral. **Check: build menu scroll, 0 of 37 frames damaged.** **Done 2026-08-26, but not against this check.** The build menu was never the fault. What was checked instead: 0 dirty frames of 20 in the probe, and a human driving the game through the three interactions that reproduced the artefact. The frame count this step asked for was not run.
 6. Measure. `SPRING_FPS_LOG=5 run-capped.sh 120`, interleaved. **Check: a frame time number with the Mesa commit beside it.**
 
 Steps 1 and 2 are most of the code. Step 3 holds most of the risk and most of the time, because identical output across two games is a stronger claim than it sounds.
@@ -133,6 +137,6 @@ Steps 1 and 2 are most of the code. Step 3 holds most of the risk and most of th
 
 ## Not decided
 
-- Whether step 5 works at all. If compiled lists still damage the build menu with buffering on, the deferral stays and the 47 list-compiling widgets stay blocked
+- ~~Whether step 5 works at all. If compiled lists still damage the build menu with buffering on, the deferral stays and the 47 list-compiling widgets stay blocked~~ **Decided 2026-08-26.** It works, and the build menu was never the obstacle. The 47 widgets are unblocked
 - What the frame time actually becomes. The flush is worth 1.87x on its own, and removing 790,748 calls a frame is worth something further, but nobody has measured the sum
 - Whether upstream wants the config gate kept
