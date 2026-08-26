@@ -164,6 +164,7 @@ class LuaOpenGL {
 
 	private:
 		static void CheckDrawingEnabled(lua_State* L, const char* caller);
+		static bool InsideBatch();
 		static void CondWarnDeprecatedGL(lua_State* L, const char* caller);
 		static void NotImplementedError(lua_State* L, const char* caller);
 
