@@ -229,7 +229,20 @@ Buffering alone is worth 5.7%, with every buffered sample above every legacy sam
 
 **The display list deferral, not the flush, is the rest.** Compiling lists reaches 31.29 and `ForceImmediateModeFlush = 0` reaches 31.35, and the second of those turns off the deferral as well. So the engine's own 40 `glBeginBatch` callers, 28 of them in `GuiHandler.cpp`, are not where the remaining time goes. The deferral is worth 1.84x on its own.
 
-**Compiled lists still cannot ship, for a new reason.** With buffering on they no longer merge batches, but the build menu renders horizontally compressed. Measured on the menu region, 39,082 differing pixels of 450,000 against a same-configuration noise floor of 25. No horizontal shift improves the match, so it is a scale rather than an offset, which points at a projection baked in at compile time rather than at anything to do with batching. Reverted, and worth chasing on its own.
+**Compiled lists differ from deferred ones, and the deferred side may be the wrong one.** 39,082 differing pixels of 450,000 on the build menu, against a same-configuration noise floor of 25. Reverted pending an explanation.
+
+The difference is not geometry. Neither a horizontal shift nor a horizontal scale improves the match, both were swept, and magnified crops show identical icon positions, sizes and text placement. It is a blend difference, and the compiled side is lighter.
+
+| Sample in the menu | compiled | deferred | implied background |
+|---|---|---|---|
+| (30,480) | 29 | 8 | 97 |
+| (30,300) | 73 | 21 | 243 |
+
+`DrawPanel` in `gui_static_buildordermenu.lua` lays a black overlay at `ui_opacity`, which is 0.7 in both runs, so each application leaves 0.3 of what is behind it. Two applications leave 0.09. The ratio 0.3 against 0.09 is 3.33, and both samples fit it at very different background values.
+
+So the deferred path applies that overlay twice and the compiled path applies it once. Which is correct is unresolved, and the uncomfortable reading is that compiled lists render what the widget asks for while the deferral, which exists only on this branch, has been darkening the UI since it was written. The output is stable frame to frame either way, 2.2 differing pixels between two frames against 2.9 for the deferred path, so nothing is replaying stale buffer contents.
+
+Next step is a minimal reproduction rather than more reading of a 1,434 line widget: one throwaway widget that draws the same rectangle twice, once through a compiled list and once directly, and a pixel comparison of the two.
 
 ### Rendering is unchanged by buffering, tested 2026-08-26
 

@@ -6508,10 +6508,11 @@ int LuaOpenGL::CreateList(lua_State* L)
 	// neither can any flush at replay time. Keep the function instead and run it
 	// live on every gl.CallList, which is the path the mitigation does reach.
 	//
-	// Buffering does not remove the reason, though it removes the one that was
-	// written here. Compiling with buffering on was measured at 31.29 fps against
-	// 16.97 deferred, and it renders the build menu horizontally compressed, which
-	// is a baked projection rather than a merged batch. Worth chasing separately.
+	// Buffering removes the reason written above, but not the deferral. Compiling
+	// with buffering on measured 31.29 fps against 16.97 deferred, and drew the
+	// build menu lighter. Geometry is identical, so it is a blend difference, and
+	// the ratio says the deferred path lays the panel's overlay down twice where
+	// the compiled path lays it once. Which of those is correct is unresolved.
 	if (!globalRendering->supportImmediateModeBatching) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
