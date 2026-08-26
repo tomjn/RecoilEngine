@@ -56,6 +56,8 @@ typedef void GLvoid;
 #define GL_CULL_FACE          0x0B44
 #define GL_SRC_ALPHA          0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#define GL_COMPILE            0x1300
+#define GL_TEXTURE_COORD_ARRAY 0x8078
 
 static const GLubyte* (*p_glGetString)(GLenum);
 static GLenum (*p_glGetError)(void);
@@ -79,6 +81,11 @@ static void (*p_glDrawArrays)(GLenum, GLint, GLsizei);
 static void (*p_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, GLvoid*);
 static void (*p_glPixelStorei)(GLenum, GLint);
 static void (*p_glRectf)(GLfloat, GLfloat, GLfloat, GLfloat);
+static void (*p_glTexCoordPointer)(GLint, GLenum, GLsizei, const GLvoid*);
+static GLuint (*p_glGenLists)(GLsizei);
+static void (*p_glNewList)(GLuint, GLenum);
+static void (*p_glEndList)(void);
+static void (*p_glCallList)(GLuint);
 
 #define LOAD(name) do { \
 	p_##name = (void*) eglGetProcAddress(#name); \
@@ -113,6 +120,38 @@ static float vert4[BATCHES * DIVS * 4];
 // One batch worth, refilled per draw for MODE_ARRAYS_REUSED.
 static float scratch[DIVS * 4];
 
+// A texture coordinate array to bind alongside the vertex array, because every
+// case in this probe until now bound a vertex array and nothing else, while the
+// UI drawing being hunted is textured. IssueBatch binds a texcoord array at size
+// 4 whenever a block calls gl.TexCoord, which the game's RectRound does.
+//
+// Deliberately not the vertex data. It is a ring at 0.9 NDC, so if a draw ever
+// takes its positions from this array instead of the vertex array, the frame
+// gains a huge ring rather than a subtly wrong circle.
+static float tex4[DIVS * 4];
+
+static int withTexCoordArray = 0;
+
+// Let the compiled draw point at its own storage instead of the shared scratch,
+// so the shared buffer can be ruled in or out as a required ingredient.
+static int midstreamOwnArray = 0;
+
+// Radius of the ring in tex4, in NDC. A variable so the corruption can be shown
+// to track it: if the wrecked geometry moves when this moves, the draw is taking
+// its positions from the texture coordinate array, which is a demonstration
+// rather than an inference.
+static float texRingRadius = 0.9f;
+
+// Rebind the texcoord pointer before every live draw rather than once for the
+// run. IssueBatch already does exactly this, so if it fixes the mixed case the
+// engine has a workaround, and if it does not the engine cannot help itself.
+static int rebindTexPerDraw = 0;
+
+// Flush either side of glCallList and nowhere else. This is the only placement
+// the engine can actually implement, because LuaOpenGL::CallList is the one site
+// it controls. A flush before every draw is not available to it.
+static int flushAroundCallList = 0;
+
 static unsigned char* reference;
 static unsigned char* current;
 
@@ -128,6 +167,13 @@ static void buildGeometry(void)
 		const float a = ((d + 1) / (float) DIVS) * 3.14159265358979f * 2.0f;
 		cosines[d] = cosf(a) * RADIUS;
 		sines[d]   = sinf(a) * RADIUS;
+	}
+
+	for (int d = 0; d < DIVS; d++) {
+		tex4[d * 4 + 0] = (cosines[d] / RADIUS) * texRingRadius;
+		tex4[d * 4 + 1] = (sines[d]   / RADIUS) * texRingRadius;
+		tex4[d * 4 + 2] = 0.0f;
+		tex4[d * 4 + 3] = 1.0f;
 	}
 
 	for (int b = 0; b < BATCHES; b++) {
@@ -177,7 +223,35 @@ enum Mode {
 	// glRectf rather than glBegin, and the engine loses exactly the two batches
 	// that follow one. glBegin followed by arrays is already clean, so if this is
 	// not, the difference is glRectf specifically.
-	MODE_RECTF_FIRST
+	MODE_RECTF_FIRST,
+
+	// One display list a batch, all replayed, no direct drawing at all. Control
+	// for the case below.
+	MODE_LIST_EACH,
+
+	// Alternating glCallList and direct glDrawArrays, which is the frame the
+	// engine actually produces once gl.CreateList compiles: 47 widgets replay
+	// lists while every other widget and the engine itself draws directly.
+	//
+	// IssueBatch fixes its own glVertexPointer size at 4 because varying it
+	// corrupts the frame. It cannot fix the size a list replay uses internally,
+	// because glVertexPointer is never compiled into a list. If the driver
+	// replays with a different size, every direct draw beside a list gets the
+	// corruption the arity mitigation exists to prevent.
+	MODE_LIST_INTERLEAVED,
+
+	// A live draw, then a glNewList opened straight after it, and the compiled
+	// draw refills the very buffer the live draw was handed. This is what
+	// gui_tooltip.lua does every frame a tooltip is up: RectRound draws live,
+	// then gl.CreateList wraps another RectRound, and both go through the one
+	// LuaImmediateBatch vector.
+	//
+	// Every earlier case had the list on its own. Refilling a shared buffer is
+	// clean, and compiling a list is clean, but the two have never been put in
+	// this order. If opening a list changes when the driver consumes the client
+	// array data of a draw already issued, the live draw renders the list's
+	// geometry instead of its own.
+	MODE_LIST_MIDSTREAM
 };
 
 // The engine loses GL_QUADS, and every result here so far is GL_LINE_LOOP.
@@ -198,6 +272,70 @@ static int rectfFirstBatch = 0;
 // alternating colours are the expected output here, not a defect, so the
 // reference has to be immediate mode drawn the same way.
 static int recolourEachBatch = 0;
+
+// Compile the whole run into a display list and replay it, rather than drawing
+// directly. This is the one cell of the matrix never tested. gl.CreateList is
+// deferred on this branch precisely because compiling it destroys the build
+// menu, and the engine's buffered path hands glDrawArrays a pointer into a
+// vector that the next block clears and refills.
+//
+// The GL specification says a DrawArrays compiled into a list dereferences its
+// array data at compile time. LIST_CLOBBER checks that claim against the driver
+// rather than trusting it: it overwrites the shared buffer after glEndList and
+// before glCallList, so a driver that kept the pointer draws the clobber
+// geometry instead of the batch that was compiled.
+enum ListMode {
+	LIST_NONE,
+	LIST_COMPILE,  // compile and replay, buffer untouched in between
+	LIST_CLOBBER   // compile, overwrite the shared buffer, then replay
+};
+
+static enum ListMode listMode = LIST_NONE;
+static GLuint dlist = 0;
+
+// One list a batch, for the two per-batch list modes. Compiled once, because
+// recompiling 2000 lists a frame measures list compilation rather than replay.
+static GLuint listBase = 0;
+
+static void buildPerBatchLists(void)
+{
+	p_glEnableClientState(GL_VERTEX_ARRAY);
+
+	if (withTexCoordArray) {
+		p_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		p_glTexCoordPointer(4, GL_FLOAT, 0, tex4);
+	}
+
+	for (int b = 0; b < BATCHES; b++) {
+		// Size 4, the only size IssueBatch ever uses. Whatever the replay does
+		// with that is the driver's choice, not the caller's.
+		p_glVertexPointer(4, GL_FLOAT, 0, &vert4[b * DIVS * 4]);
+
+		p_glNewList(listBase + b, GL_COMPILE);
+		p_glDrawArrays(primType, 0, DIVS);
+		p_glEndList();
+	}
+
+	if (withTexCoordArray)
+		p_glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	p_glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+// A ring at 0.9 NDC, nothing like the 7 pixel circles the batches draw. If a
+// replayed list picks this up the frame gains thousands of extra pixels in a
+// shape no correct run can produce, so the result cannot be read as drift.
+static void clobberScratch(void)
+{
+	for (int d = 0; d < DIVS; d++) {
+		const float a = ((d + 1) / (float) DIVS) * 3.14159265358979f * 2.0f;
+
+		scratch[d * 4 + 0] = cosf(a) * 0.9f;
+		scratch[d * 4 + 1] = sinf(a) * 0.9f;
+		scratch[d * 4 + 2] = 0.0f;
+		scratch[d * 4 + 3] = 1.0f;
+	}
+}
 
 enum Separator {
 	SEP_NONE,
@@ -221,10 +359,25 @@ static void render(enum Mode mode, enum Separator sep)
 
 	const int anyArrays = (mode == MODE_ARRAYS || mode == MODE_ARRAYS_ARITY ||
 	                       mode == MODE_MIXED  || mode == MODE_ONE_IMMEDIATE ||
-	                       mode == MODE_ARRAYS_REUSED || mode == MODE_RECTF_FIRST);
+	                       mode == MODE_ARRAYS_REUSED || mode == MODE_RECTF_FIRST ||
+	                       mode == MODE_LIST_INTERLEAVED || mode == MODE_LIST_MIDSTREAM);
 
 	if (anyArrays)
 		p_glEnableClientState(GL_VERTEX_ARRAY);
+
+	// Bound once for the run rather than per batch. IssueBatch rebinds it every
+	// batch, but the address never changes, so the difference is call count only
+	// and this keeps the case comparable to the vertex-only ones beside it.
+	if (anyArrays && withTexCoordArray) {
+		p_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		p_glTexCoordPointer(4, GL_FLOAT, 0, tex4);
+	}
+
+	// Client array state is never compiled into a list, only the draws are, so
+	// the enable above sits outside on purpose. That is also what the engine
+	// does: IssueBatch's enables run at compile time and are gone at replay.
+	if (listMode != LIST_NONE)
+		p_glNewList(dlist, GL_COMPILE);
 
 	for (int b = 0; b < BATCHES; b++) {
 		// A narrow batch is every other one, so a defect that needs two unlike
@@ -240,6 +393,52 @@ static void render(enum Mode mode, enum Separator sep)
 			usesArrays = (b > 0);
 
 		separate(sep);
+
+		// Odd batches are consumed by the even batch before them, which draws
+		// itself live and then compiles this one inside a list off the same
+		// buffer. Two batches an iteration, so the picture still matches a
+		// reference that draws every batch once.
+		if (mode == MODE_LIST_MIDSTREAM) {
+			if (narrow)
+				continue;
+
+			memcpy(scratch, &vert4[b * DIVS * 4], sizeof(float) * DIVS * 4);
+			p_glVertexPointer(4, GL_FLOAT, 0, scratch);
+			p_glDrawArrays(primType, 0, DIVS);
+
+			// No separator. The widget has none either, and the point is what
+			// glNewList does to the draw that has just been issued.
+			if (b + 1 < BATCHES) {
+				p_glNewList(dlist, GL_COMPILE);
+
+				if (midstreamOwnArray) {
+					p_glVertexPointer(4, GL_FLOAT, 0, &vert4[(b + 1) * DIVS * 4]);
+				} else {
+					memcpy(scratch, &vert4[(b + 1) * DIVS * 4], sizeof(float) * DIVS * 4);
+					p_glVertexPointer(4, GL_FLOAT, 0, scratch);
+				}
+
+				p_glDrawArrays(primType, 0, DIVS);
+				p_glEndList();
+				p_glCallList(dlist);
+			}
+
+			continue;
+		}
+
+		// Every batch replayed from its own list, nothing drawn directly.
+		if (mode == MODE_LIST_EACH) {
+			p_glCallList(listBase + b);
+			continue;
+		}
+
+		// Half from lists, half direct, which is the mix a real frame has.
+		if (mode == MODE_LIST_INTERLEAVED && narrow) {
+			if (flushAroundCallList) p_glFlush();
+			p_glCallList(listBase + b);
+			if (flushAroundCallList) p_glFlush();
+			continue;
+		}
 
 		// glRectf is its own immediate-mode primitive and never passes through
 		// glBeginBatch, so nothing in the engine ever put a flush in front of it.
@@ -279,6 +478,11 @@ static void render(enum Mode mode, enum Separator sep)
 				p_glVertexPointer(4, GL_FLOAT, 0, &vert4[b * DIVS * 4]);
 			}
 
+			if (withTexCoordArray && rebindTexPerDraw) {
+				p_glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+				p_glTexCoordPointer(4, GL_FLOAT, 0, tex4);
+			}
+
 			p_glDrawArrays(primType, 0, DIVS);
 			continue;
 		}
@@ -295,6 +499,18 @@ static void render(enum Mode mode, enum Separator sep)
 		p_glEnd();
 	}
 
+	if (listMode != LIST_NONE) {
+		p_glEndList();
+
+		if (listMode == LIST_CLOBBER)
+			clobberScratch();
+
+		p_glCallList(dlist);
+	}
+
+	if (anyArrays && withTexCoordArray)
+		p_glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
 	if (anyArrays)
 		p_glDisableClientState(GL_VERTEX_ARRAY);
 
@@ -304,6 +520,26 @@ static void render(enum Mode mode, enum Separator sep)
 static void readback(unsigned char* dst)
 {
 	p_glReadPixels(0, 0, SURF_W, SURF_H, GL_RGBA, GL_UNSIGNED_BYTE, dst);
+}
+
+// A defect's pixel count says how much is wrong, never what it looks like. Two
+// faults with the same count can be a scatter of stray dots and a screen filling
+// shape, and only one of those is a candidate for the artefact being hunted.
+static void dumpPPM(const char* path, const unsigned char* src)
+{
+	FILE* f = fopen(path, "wb");
+
+	if (f == NULL) { fprintf(stderr, "cannot write %s\n", path); return; }
+
+	fprintf(f, "P6\n%d %d\n255\n", SURF_W, SURF_H);
+
+	// glReadPixels hands back bottom row first, PPM wants top row first.
+	for (int y = SURF_H - 1; y >= 0; y--)
+		for (int x = 0; x < SURF_W; x++)
+			fwrite(&src[(y * SURF_W + x) * 4], 1, 3, f);
+
+	fclose(f);
+	printf("wrote %s\n", path);
 }
 
 // Counts pixels that differ from the reference, split by direction. Extra means
@@ -403,6 +639,8 @@ int main(int argc, char** argv)
 	LOAD(glEnable); LOAD(glBlendFunc);
 	LOAD(glEnableClientState); LOAD(glDisableClientState); LOAD(glVertexPointer);
 	LOAD(glDrawArrays); LOAD(glReadPixels); LOAD(glPixelStorei); LOAD(glRectf);
+	LOAD(glGenLists); LOAD(glNewList); LOAD(glEndList); LOAD(glCallList);
+	LOAD(glTexCoordPointer);
 
 	printf("GL_RENDERER = %s\n", (const char*) p_glGetString(GL_RENDERER));
 	printf("GL_VERSION  = %s\n", (const char*) p_glGetString(GL_VERSION));
@@ -432,6 +670,64 @@ int main(int argc, char** argv)
 	render(MODE_IMMEDIATE, SEP_FLUSH);
 	readback(reference);
 
+	// batch_merge_probe <iterations> --dump <dir> writes each interesting case as
+	// a PPM and stops. Scoring tells you a case is dirty, this tells you whether
+	// it is dirty in the shape you are hunting.
+	if (argc > 3 && strcmp(argv[2], "--dump") == 0) {
+		char path[512];
+
+		snprintf(path, sizeof(path), "%s/ref-immediate-flush.ppm", argv[3]);
+		dumpPPM(path, reference);
+
+		render(MODE_ARRAYS_ARITY, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/arrays-varying-pointer-size.ppm", argv[3]);
+		dumpPPM(path, current);
+
+		render(MODE_IMMEDIATE, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/immediate-no-separator.ppm", argv[3]);
+		dumpPPM(path, current);
+
+		primType = GL_QUADS;
+		render(MODE_ARRAYS_ARITY, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/quads-varying-pointer-size.ppm", argv[3]);
+		dumpPPM(path, current);
+		primType = GL_LINE_LOOP;
+
+		// The case that reproduces the wedge. Needs a list opened straight after
+		// a live draw, a texcoord array, and the shared buffer, all together.
+		dlist = p_glGenLists(1);
+		withTexCoordArray = 1;
+		render(MODE_LIST_MIDSTREAM, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/midstream-list-textured.ppm", argv[3]);
+		dumpPPM(path, current);
+
+		primType = GL_QUADS;
+		render(MODE_LIST_MIDSTREAM, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/midstream-list-textured-quads.ppm", argv[3]);
+		dumpPPM(path, current);
+
+		// Shrink the texcoord ring and redraw. If the wrecked geometry shrinks
+		// with it, the positions are coming from the texture coordinate array.
+		texRingRadius = 0.25f;
+		buildGeometry();
+		render(MODE_LIST_MIDSTREAM, SEP_NONE);
+		readback(current);
+		snprintf(path, sizeof(path), "%s/midstream-texring-0.25.ppm", argv[3]);
+		dumpPPM(path, current);
+		texRingRadius = 0.9f;
+		buildGeometry();
+
+		primType = GL_LINE_LOOP;
+		withTexCoordArray = 0;
+
+		return 0;
+	}
+
 	printf("controls\n");
 	compare("immediate, flush   (reference)", MODE_IMMEDIATE, SEP_FLUSH, iterations);
 	compare("arrays,    finish  (2nd truth)", MODE_ARRAYS,    SEP_FINISH, iterations);
@@ -443,6 +739,13 @@ int main(int argc, char** argv)
 	compare("arrays,    no separator",        MODE_ARRAYS,       SEP_NONE, iterations);
 	compare("arrays,    flush",               MODE_ARRAYS,       SEP_FLUSH, iterations);
 	compare("arrays,    varying pointer size", MODE_ARRAYS_ARITY, SEP_NONE, iterations);
+
+	// Never asked before. If a flush cleans this the way it cleans batch merging,
+	// then varying pointer size is the same separator problem wearing a different
+	// hat, and no display list can ever be safe from it: glFlush executes during
+	// compilation and is never recorded, so a list has no separator to replay.
+	compare("arrays,    varying size, flush",  MODE_ARRAYS_ARITY, SEP_FLUSH, iterations);
+	compare("arrays,    varying size, finish", MODE_ARRAYS_ARITY, SEP_FINISH, iterations);
 	compare("immediate, varying arity, flush", MODE_IMMEDIATE_ARITY, SEP_FLUSH, iterations);
 
 	printf("\nmixing the two, which is what the engine now emits\n");
@@ -454,6 +757,147 @@ int main(int argc, char** argv)
 	printf("\none buffer refilled per batch, as LuaImmediateBatch does\n");
 	compare("arrays, reused buffer",           MODE_ARRAYS_REUSED, SEP_NONE, iterations);
 	compare("arrays, reused buffer, flush",    MODE_ARRAYS_REUSED, SEP_FLUSH, iterations);
+
+	// Compiled into a display list and replayed, which is what gl.CreateList does
+	// once the deferral comes off. Same reference: a list that replays correctly
+	// is indistinguishable from drawing directly.
+	printf("\ncompiled into a display list, then replayed\n");
+	dlist = p_glGenLists(1);
+
+	listMode = LIST_COMPILE;
+	compare("list, immediate",                 MODE_IMMEDIATE,     SEP_NONE, iterations);
+	compare("list, arrays, own array a batch", MODE_ARRAYS,        SEP_NONE, iterations);
+	compare("list, arrays, reused buffer",     MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+
+	// A list whose draws do not all use the same vertex pointer size. This is the
+	// combination a real widget produces: IssueBatch draws position at size 4, the
+	// font renderer draws it at size 3, and gl.Text inside a gl.CreateList puts
+	// both in one list. Outside a list the engine can separate them. Inside one it
+	// cannot, because no separator is ever recorded.
+	compare("list, arrays, varying size",      MODE_ARRAYS_ARITY,  SEP_NONE, iterations);
+	compare("list, arrays, varying size, flush", MODE_ARRAYS_ARITY, SEP_FLUSH, iterations);
+
+	// The same three with the shared buffer overwritten between glEndList and
+	// glCallList. Only the reused case can notice, and only if the driver kept
+	// the pointer instead of dereferencing at compile time.
+	printf("\nsame, with the shared buffer overwritten before replay\n");
+	listMode = LIST_CLOBBER;
+	compare("list, arrays, own array a batch", MODE_ARRAYS,        SEP_NONE, iterations);
+	compare("list, arrays, reused buffer",     MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+	listMode = LIST_NONE;
+
+	// One list a batch rather than one list for the run, and then the mix that
+	// matters: list replays and direct draws alternating in the same frame.
+	printf("\none list a batch, replayed beside direct draws\n");
+	listBase = p_glGenLists(BATCHES);
+	buildPerBatchLists();
+
+	compare("every batch from its own list",   MODE_LIST_EACH,        SEP_NONE, iterations);
+	compare("lists and direct draws alternating", MODE_LIST_INTERLEAVED, SEP_NONE, iterations);
+	compare("lists and direct, flush",         MODE_LIST_INTERLEAVED, SEP_FLUSH, iterations);
+
+	// Are many small textured lists enough on their own, without any compiling
+	// happening mid-stream? These lists are compiled once, up front, and only
+	// replayed in the loop. If they are clean, the fault is in compiling a list
+	// beside live drawing, not in replaying one.
+	printf("\nthe same per-batch lists, textured\n");
+	withTexCoordArray = 1;
+	buildPerBatchLists();
+
+	compare("textured, every batch from a list", MODE_LIST_EACH,        SEP_NONE, iterations);
+	compare("textured, lists and direct mixed",  MODE_LIST_INTERLEAVED, SEP_NONE, iterations);
+
+	// Can the caller defend itself? These are the three things engine code can
+	// do around a list replay without changing what any widget draws.
+	// The candidate engine fix, on its own, with no separator anywhere else.
+	flushAroundCallList = 1;
+	compare("same, flush around glCallList",     MODE_LIST_INTERLEAVED, SEP_NONE,  iterations);
+	flushAroundCallList = 0;
+
+	compare("same, flush only",                  MODE_LIST_INTERLEAVED, SEP_FLUSH, iterations);
+	compare("same, finish only",                 MODE_LIST_INTERLEAVED, SEP_FINISH, iterations);
+
+	rebindTexPerDraw = 1;
+	compare("same, texcoord pointer rebound",    MODE_LIST_INTERLEAVED, SEP_NONE,  iterations);
+	compare("same, rebound and flushed",         MODE_LIST_INTERLEAVED, SEP_FLUSH, iterations);
+	compare("same, rebound and finished",        MODE_LIST_INTERLEAVED, SEP_FINISH, iterations);
+	rebindTexPerDraw = 0;
+
+	withTexCoordArray = 0;
+	buildPerBatchLists();
+
+	// The order gui_tooltip.lua actually produces: draw live, then open a list
+	// and refill the buffer that live draw was handed.
+	printf("\na list opened straight after a live draw, sharing its buffer\n");
+	compare("live draw, then compile off it",  MODE_LIST_MIDSTREAM, SEP_NONE,  iterations);
+	compare("same, flush between",             MODE_LIST_MIDSTREAM, SEP_FLUSH, iterations);
+
+	withTexCoordArray = 1;
+	compare("same, with texcoords",            MODE_LIST_MIDSTREAM, SEP_NONE,  iterations);
+
+	// Does a separator fix it, the way it fixes batch merging and varying
+	// pointer size? If so the engine has a one line mitigation available.
+	compare("same, texcoords, flush",          MODE_LIST_MIDSTREAM, SEP_FLUSH, iterations);
+	compare("same, texcoords, finish",         MODE_LIST_MIDSTREAM, SEP_FINISH, iterations);
+
+	// Is the shared buffer required, or is opening a list after a textured draw
+	// enough on its own? Separates "give each batch its own storage" from
+	// "separate the draw from the glNewList" as the fix.
+	midstreamOwnArray = 1;
+	compare("same, list has its own array",    MODE_LIST_MIDSTREAM, SEP_NONE,  iterations);
+	midstreamOwnArray = 0;
+
+	withTexCoordArray = 0;
+
+	printf("\nsame as GL_QUADS, which is what RectRound draws\n");
+	primType = GL_QUADS;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	compare("quads, live draw then compile",   MODE_LIST_MIDSTREAM, SEP_NONE,  iterations);
+	withTexCoordArray = 1;
+	compare("quads, textured, same",           MODE_LIST_MIDSTREAM, SEP_NONE,  iterations);
+	withTexCoordArray = 0;
+
+	primType = GL_LINE_LOOP;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	// A texture coordinate array bound alongside the vertex array. Nothing is
+	// textured here, so a correct driver draws the same picture as the cases
+	// above and the reference still applies. A driver that muddles which array
+	// feeds which attribute when baking a list draws the texcoord ring instead.
+	//
+	// This is the probe's oldest blind spot. Every case before it bound a vertex
+	// array and nothing else, while the drawing being hunted is a textured
+	// GL_QUADS batch from the game's RectRound.
+	printf("\na texcoord array bound too, as a textured batch has\n");
+	withTexCoordArray = 1;
+
+	compare("arrays, texcoords",               MODE_ARRAYS,        SEP_NONE, iterations);
+	compare("arrays, texcoords, reused buffer", MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+
+	listMode = LIST_COMPILE;
+	compare("list, texcoords",                 MODE_ARRAYS,        SEP_NONE, iterations);
+	compare("list, texcoords, reused buffer",  MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+	compare("list, texcoords, varying size",   MODE_ARRAYS_ARITY,  SEP_NONE, iterations);
+	listMode = LIST_NONE;
+
+	printf("\nsame, as GL_QUADS, which is what RectRound draws\n");
+	primType = GL_QUADS;
+	withTexCoordArray = 0;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+	withTexCoordArray = 1;
+
+	compare("quads, arrays, texcoords",        MODE_ARRAYS,        SEP_NONE, iterations);
+	listMode = LIST_COMPILE;
+	compare("quads, list, texcoords",          MODE_ARRAYS,        SEP_NONE, iterations);
+	compare("quads, list, texcoords, reused",  MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+	listMode = LIST_NONE;
+
+	primType = GL_LINE_LOOP;
+	withTexCoordArray = 0;
 
 	// Its own reference, because the alternating colours are the wanted output.
 	printf("\ncurrent colour changed between batches, no colour array\n");
