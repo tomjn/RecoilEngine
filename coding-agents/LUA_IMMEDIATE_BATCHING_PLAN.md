@@ -12,6 +12,8 @@
 
 **Branch:** `macos/lua-immediate-batching`, off `macos/integration`.
 
+**Status, 2026-08-26.** Tasks 1 to 4 are done and committed. Both engine targets build and the 14 accumulator tests pass. Task 5 onwards needs an engine run and has not started, so nothing here has yet been seen to draw a single pixel. Two things came up that the plan did not predict, both now fixed and committed: a colour set in a block that drew nothing was being lost, and the headless link was missing stubs for three vertex array pointers.
+
 ## Global constraints
 
 - The vertex pointer size never varies. Position is always `glVertexPointer(4, GL_FLOAT, 0, ...)` and every texture coordinate is always four floats. Varying it corrupts the frame on KosmicKrisp, 30 frames of 30
