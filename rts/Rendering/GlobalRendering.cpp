@@ -1117,6 +1117,23 @@ void CGlobalRendering::SetGLSupportFlags()
 	{
 		const int forceFlush = configHandler->GetInt("ForceImmediateModeFlush");
 		supportImmediateModeBatching = (forceFlush < 0) ? ProbeImmediateModeBatching() : (forceFlush == 0);
+
+		// Say so loudly. Setting this to 0 claims the driver renders immediate-mode
+		// batches correctly, which turns off vertex and texture coordinate arity
+		// widening, the per-batch flush, and the display list deferral together. On
+		// a driver that does not, the red triangles, distorted geometry and
+		// flickering all come back.
+		//
+		// It is worth about 1.87x, and that is exactly why it keeps getting
+		// mistaken for a performance option. Somebody measures the jump, forgets
+		// which mitigations paid for it, and chases the number. This log line
+		// exists so the reason is in front of whoever reads the infolog next.
+		if (forceFlush == 0) {
+			LOG_L(L_WARNING,
+				"[GR::%s] ForceImmediateModeFlush=0 disables every immediate-mode "
+				"mitigation. Expect red triangles and distorted geometry. It is a "
+				"capability override, not a speed setting.", __func__);
+		}
 	}
 }
 

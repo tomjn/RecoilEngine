@@ -26,10 +26,10 @@ Last updated 2026-08-26. Companion to `MACOS_RENDERER_PLAN.md`, which holds the 
 | Is render scaling a way out? | No, flat 38ms penalty for any non-1:1 present | 6 runs |
 | Are render pass breaks the problem? | Probably not. Model demoted | `rp` found nothing |
 | Is it the engine's fault? | Mostly no. Empty Mod runs at 80 fps | Measured |
-| What is the one big engine-side fix? | Not `glBegin` after all. It is the display list deferral | Measured 2026-08-26 |
+| What is the one big engine-side fix? | Nothing large is left that does not cost correctness | Measured 2026-08-26 |
 | Would a buffered draw hit the same driver defect? | No. `glDrawArrays` is clean over 60,000 pairs | Measured, with a control |
 | What did buffering Lua actually buy? | 5.7%, cleanly separated but small | 2 runs a side |
-| What is the deferral costing? | 1.84x, and compiled lists still break the build menu | 1 run, large effect |
+| What does the deferral cost? | 1.84x, and it is buying correct output, not wasting it | 1 run, large effect |
 
 **Headline numbers**, Splinter Faction, 3024x1832, built-in display:
 
@@ -227,7 +227,11 @@ A run peaks near 8 GiB on 16 GB of RAM. A leaking driver reaches 54 GB and freez
 
 Buffering alone is worth 5.7%, with every buffered sample above every legacy sample, 16.46 to 17.73 against 15.36 to 16.31. A clean separation of a small effect.
 
-**The display list deferral, not the flush, is the rest.** Compiling lists reaches 31.29 and `ForceImmediateModeFlush = 0` reaches 31.35, and the second of those turns off the deferral as well. So the engine's own 40 `glBeginBatch` callers, 28 of them in `GuiHandler.cpp`, are not where the remaining time goes. The deferral is worth 1.84x on its own.
+**The rest of the gap is the display list deferral, and it is not available.** Compiling lists reaches 31.29 and `ForceImmediateModeFlush = 0` reaches 31.35, and the second of those turns off the deferral as well. So the engine's own 40 `glBeginBatch` callers, 28 of them in `GuiHandler.cpp`, are not where the remaining time goes.
+
+Read that 1.84x the same way as the flush's 1.87x, which is to say as the price of correct output rather than as headroom. Both figures come from turning a mitigation off, and both bring the artefacts back with them. The measurement in this very section says so: with lists compiled, the build menu renders wrong. That is the deferral doing its job.
+
+This trap has caught this project more than once. A large number appears, the mitigation it disabled is forgotten, and the number gets chased. `ForceImmediateModeFlush = 0` is the usual route in, and [Settled: do not reopen](#settled-do-not-reopen) has the standing warning.
 
 **Compiled lists differ from deferred ones, and the deferred side may be the wrong one.** 39,082 differing pixels of 450,000 on the build menu, against a same-configuration noise floor of 25. Reverted pending an explanation.
 

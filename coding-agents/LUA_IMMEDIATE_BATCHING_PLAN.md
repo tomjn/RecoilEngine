@@ -18,7 +18,7 @@
 - Task 5 passed. Buffering is indistinguishable from the old path, 50 differing pixels on the build menu against a same-configuration floor of 25
 - Task 6 is moot. Buffering already skips the flush and the arity widening, and the engine's own `glBeginBatch` callers turned out not to be where the time goes
 - Task 7 failed. Compiled lists reach 31.29 fps against 16.97, but render the build menu horizontally compressed. Reverted
-- Task 8 done. Buffering is worth 5.7%. The deferral is worth 1.84x and is now the main lever
+- Task 8 done. Buffering is worth 5.7%. The deferral costs 1.84x and that is the price of correct output, not a lever to pull
 
 Four things the plan did not predict, all fixed or recorded: a colour set in a block that drew nothing was lost, the headless link was missing three vertex array pointer stubs, `Spring.GetProfilerTimeRecord` had two crash bugs that made the probe kill the engine 25 seconds into every run on any branch, and the build menu failure mode for compiled lists is a projection problem rather than a batching one.
 
