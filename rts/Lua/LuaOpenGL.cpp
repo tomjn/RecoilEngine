@@ -86,6 +86,7 @@
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
 CONFIG(bool, LuaImmediateModeBuffering).defaultValue(true).description("Collect each gl.BeginEnd block and draw it with one glDrawArrays instead of one call a vertex. Set to false to restore the glBegin path.");
+CONFIG(int, LuaDisplayListMode).defaultValue(1).description("How gl.CreateList behaves where the driver mis-renders batches. 1 compiles into a real GL display list and replays it, which is the default. 0 defers instead, keeping the Lua function and running it live on every gl.CallList, which is much slower and is the way back if a driver needs it. 2 compiles the list and then throws the replay away, running the function live instead, which separates a fault caused by compiling from one caused by replaying. 2 is a diagnostic and is slower than either.");
 
 /*** Callouts for OpenGL API
  *
@@ -108,6 +109,10 @@ int  LuaOpenGL::deprecatedGLWarnLevel = 0;
 // one GL context, so one accumulator serves them all.
 static bool luaImmediateBuffering = true;
 static LuaImmediateBatch luaBatch;
+
+// 0 defer, 1 compile and replay, 2 compile and discard the replay. See the
+// CONFIG above and the comment in CreateList.
+static int luaDisplayListMode = 0;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -547,6 +552,7 @@ void LuaOpenGL::Init()
 	canUseShaders = configHandler->GetBool("LuaShaders");
 
 	luaImmediateBuffering = configHandler->GetBool("LuaImmediateModeBuffering");
+	luaDisplayListMode = configHandler->GetInt("LuaDisplayListMode");
 	luaBatch.SetDefaultFetch(FetchBatchDefault);
 
 	deprecatedGLWarnLevel = configHandler->GetInt("DeprecatedGLWarnLevel");
@@ -6556,17 +6562,35 @@ int LuaOpenGL::CreateList(lua_State* L)
 			"Incorrect arguments to gl.CreateList(func [, arg1, arg2, etc ...])");
 	}
 
-	// Where the driver mis-renders immediate-mode batches, do not compile at
-	// all. glFlush is executed during compilation and is never recorded into
-	// the list, so glBeginBatch cannot help a batch that is baked into one, and
-	// neither can any flush at replay time. Keep the function instead and run it
-	// live on every gl.CallList, which is the path the mitigation does reach.
+	// Lists used to be deferred here rather than compiled, because compiling
+	// them produced a screen-filling wedge of stretched UI geometry. The cause
+	// was never the compilation. It was the replay: a list holding a textured
+	// glDrawArrays corrupts the frame when live client array draws are
+	// interleaved with the replays, which is every frame, because some widgets
+	// replay lists while others draw live. CallList now flushes either side of
+	// glCallList and the wedge is gone, confirmed by a human driving the game.
 	//
-	// Buffering removes the reason written above, but not the deferral. Compiling
-	// with buffering on measured 31.29 fps against 16.97 deferred, and drew the
-	// build menu lighter. Geometry is identical, so it is a blend difference of
-	// about 3.3x in dark areas, and the mechanism is not yet known.
-	if (!globalRendering->supportImmediateModeBatching) {
+	// The deferral survives as mode 0 because it is the only way back if a
+	// driver turns out to need it, and mode 2 exists to tell compiling and
+	// replaying apart the next time something like this appears.
+	//
+	//   0  defer. Never compile, run the function live on every gl.CallList
+	//   1  compile and replay with glCallList. The default
+	//   2  compile, then run the function live anyway and never replay
+	//
+	// Mode 2 is the diagnostic. Compilation and everything it does to GL state
+	// still happens, on the same schedule, but nothing the list recorded is ever
+	// drawn. An artefact that survives mode 2 was caused by compiling. One that
+	// only appears in mode 1 was caused by replaying. Mode 2 is slower than
+	// either and is not a configuration to ship.
+	const bool deferList = !globalRendering->supportImmediateModeBatching && luaDisplayListMode == 0;
+	const bool keepFunc  = !globalRendering->supportImmediateModeBatching && luaDisplayListMode == 2;
+
+	// Non-zero only in mode 2, where the compiled list also carries the function
+	// that built it and CallList runs that instead of replaying.
+	int keptFuncRef = 0;
+
+	if (deferList || keepFunc) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
 		// A deferred list holds a Lua closure and its upvalues, not a GL name.
@@ -6594,16 +6618,24 @@ int LuaOpenGL::CreateList(lua_State* L)
 			lua_rawseti(L, -2, i);
 		}
 
-		const int funcRef = luaL_ref(L, LUA_REGISTRYINDEX);
-		const unsigned int index = displayLists.NewDeferredDList(funcRef);
+		// Copies the function and its arguments rather than consuming them, so
+		// mode 2 can hold the reference and still compile from the same stack.
+		keptFuncRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
-		lua_pushnumber(L, index);
-		return 1;
+		if (deferList) {
+			const unsigned int index = displayLists.NewDeferredDList(keptFuncRef);
+
+			lua_pushnumber(L, index);
+			return 1;
+		}
 	}
 
 	// generate the list id
 	const GLuint list = glGenLists(1);
 	if (list == 0) {
+		if (keptFuncRef != 0)
+			luaL_unref(L, LUA_REGISTRYINDEX, keptFuncRef);
+
 		lua_pushnumber(L, 0);
 		return 1;
 	}
@@ -6622,6 +6654,10 @@ int LuaOpenGL::CreateList(lua_State* L)
 
 	if (error != 0) {
 		glDeleteLists(list, 1);
+
+		if (keptFuncRef != 0)
+			luaL_unref(L, LUA_REGISTRYINDEX, keptFuncRef);
+
 		LOG_L(L_ERROR, "gl.CreateList: error(%i) = %s",
 				error, lua_tostring(L, -1));
 		lua_pushnumber(L, 0);
@@ -6629,6 +6665,12 @@ int LuaOpenGL::CreateList(lua_State* L)
 	else {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 		const unsigned int index = displayLists.NewDList(list, matData);
+
+		// CallList checks the function reference first, so attaching one here is
+		// what makes mode 2 compile the list and then never replay it.
+		if (keptFuncRef != 0)
+			displayLists.SetFuncRef(index, keptFuncRef);
+
 		lua_pushnumber(L, index);
 	}
 
@@ -6684,7 +6726,30 @@ int LuaOpenGL::CallList(lua_State* L)
 		SMatrixStateData matrixStateData = displayLists.GetMatrixState(listIndex);
 		int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
 		if (error == 0) {
+			// Separate the replay from the drawing either side of it.
+			//
+			// Replaying a list that contains a textured glDrawArrays corrupts
+			// the frame on KosmicKrisp when live client array draws are
+			// interleaved with the replays. Measured with batch_merge_probe.c:
+			// every batch from a list is clean 0 of 20, all live drawing is
+			// clean, and the two mixed is dirty 20 of 20 at about 657,000 wrong
+			// pixels a frame on a 1,152,000 pixel surface. Untextured mixing is
+			// clean, so the texture coordinate array is required.
+			//
+			// A flush either side of the replay is clean 0 of 20. Rebinding the
+			// array pointers before each draw does nothing, 20 of 20 dirty, so
+			// this is a synchronisation fault and not stale client array state.
+			//
+			// Far cheaper than the per-batch flush in glBeginBatch. A frame has
+			// thousands of batches and tens of list replays.
+			if (!globalRendering->supportImmediateModeBatching)
+				glFlush();
+
 			glCallList(dlist);
+
+			if (!globalRendering->supportImmediateModeBatching)
+				glFlush();
+
 			return 0;
 		}
 		luaL_error(L, "Matrix stack %sflow in gl.CallList", (error > 0) ? "over" : "under");

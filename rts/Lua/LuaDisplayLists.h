@@ -101,6 +101,18 @@ class CLuaDisplayLists {
 			return active.size() - 1;
 		}
 				
+		/**
+		 * Keep the recording function alongside a compiled list, so CallList
+		 * runs it instead of replaying. Lets a run compile every list and then
+		 * discard the replay, which separates a fault caused by compiling a
+		 * list from one caused by replaying it.
+		 */
+		void SetFuncRef(unsigned int index, int funcRef)
+		{
+			if (index < active.size())
+				active[index].funcRef = funcRef;
+		}
+
 		void FreeDList(unsigned int index)
 		{
 			if ((index < active.size()) && ((active[index].id != 0) || (active[index].funcRef != 0))) {
