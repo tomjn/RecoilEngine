@@ -616,6 +616,11 @@ int LuaUnsyncedRead::GetProfilerTimeRecord(lua_State* L)
 {
 	const CTimeProfiler::TimeRecord& record = CTimeProfiler::GetInstance().GetTimeRecord(lua_tostring(L, 1));
 
+	// Read before anything is pushed. Once five results are on the stack, index 2
+	// holds the pushed total rather than the caller's second argument, so a one
+	// argument call failed with "boolean expected, got number".
+	const bool wantFrameData = luaL_optboolean(L, 2, false);
+
 	int numRet = 5;
 	lua_pushnumber(L, record.total.toMilliSecsf());
 	lua_pushnumber(L, record.current.toMilliSecsf());
@@ -623,7 +628,11 @@ int LuaUnsyncedRead::GetProfilerTimeRecord(lua_State* L)
 	lua_pushnumber(L, record.stats.y); // time-%
 	lua_pushnumber(L, record.stats.z); // peak-%
 
-	if (luaL_optboolean(L, 2, false)) {
+	if (wantFrameData) {
+		// Without this table the rawset below writes into record.stats.z, which is
+		// a number, and the engine segfaults inside luaH_set.
+		lua_createtable(L, record.frames.size(), 0);
+
 		for (size_t i = 0; i < record.frames.size(); i++) {
 			lua_pushnumber(L, i + 1); // key
 			lua_pushnumber(L, record.frames[i].toMilliSecsf()); // val
