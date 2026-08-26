@@ -202,6 +202,7 @@ decltype(glad_glDrawElementsInstancedBaseVertex) glad_glDrawElementsInstancedBas
 decltype(glad_glDrawElementsInstancedBaseVertexBaseInstance) glad_glDrawElementsInstancedBaseVertexBaseInstance = nullptr;
 decltype(glad_glDrawRangeElements) glad_glDrawRangeElements = nullptr;
 decltype(glad_glEdgeFlag) glad_glEdgeFlag = nullptr;
+decltype(glad_glEdgeFlagPointer) glad_glEdgeFlagPointer = nullptr;
 decltype(glad_glEnable) glad_glEnable = nullptr;
 decltype(glad_glEnableClientState) glad_glEnableClientState = nullptr;
 decltype(glad_glEnableVertexAttribArray) glad_glEnableVertexAttribArray = nullptr;
@@ -219,6 +220,7 @@ decltype(glad_glFenceSync) glad_glFenceSync = nullptr;
 decltype(glad_glFinish) glad_glFinish = nullptr;
 decltype(glad_glFlush) glad_glFlush = nullptr;
 decltype(glad_glFlushMappedBufferRange) glad_glFlushMappedBufferRange = nullptr;
+decltype(glad_glFogCoordPointer) glad_glFogCoordPointer = nullptr;
 decltype(glad_glFogCoordf) glad_glFogCoordf = nullptr;
 decltype(glad_glFogf) glad_glFogf = nullptr;
 decltype(glad_glFogfv) glad_glFogfv = nullptr;
@@ -342,6 +344,7 @@ decltype(glad_glRotatef) glad_glRotatef = nullptr;
 decltype(glad_glScalef) glad_glScalef = nullptr;
 decltype(glad_glScissor) glad_glScissor = nullptr;
 decltype(glad_glSecondaryColor3f) glad_glSecondaryColor3f = nullptr;
+decltype(glad_glSecondaryColorPointer) glad_glSecondaryColorPointer = nullptr;
 decltype(glad_glSelectBuffer) glad_glSelectBuffer = nullptr;
 decltype(glad_glShadeModel) glad_glShadeModel = nullptr;
 decltype(glad_glShaderSource) glad_glShaderSource = nullptr;
@@ -642,6 +645,7 @@ int gladLoadGL(void) {
     glad_glDrawElementsInstancedBaseVertexBaseInstance = MakeStubImpl(glad_glDrawElementsInstancedBaseVertexBaseInstance);
     glad_glDrawRangeElements = MakeStubImpl(glad_glDrawRangeElements);
     glad_glEdgeFlag = MakeStubImpl(glad_glEdgeFlag);
+    glad_glEdgeFlagPointer = MakeStubImpl(glad_glEdgeFlagPointer);
     glad_glEnable = MakeStubImpl(glad_glEnable);
     glad_glEnableClientState = MakeStubImpl(glad_glEnableClientState);
     glad_glEnableVertexAttribArray = MakeStubImpl(glad_glEnableVertexAttribArray);
@@ -659,6 +663,7 @@ int gladLoadGL(void) {
     glad_glFinish = MakeStubImpl(glad_glFinish);
     glad_glFlush = MakeStubImpl(glad_glFlush);
     glad_glFlushMappedBufferRange = MakeStubImpl(glad_glFlushMappedBufferRange);
+    glad_glFogCoordPointer = MakeStubImpl(glad_glFogCoordPointer);
     glad_glFogCoordf = MakeStubImpl(glad_glFogCoordf);
     glad_glFogf = MakeStubImpl(glad_glFogf);
     glad_glFogfv = MakeStubImpl(glad_glFogfv);
@@ -782,6 +787,7 @@ int gladLoadGL(void) {
     glad_glScalef = MakeStubImpl(glad_glScalef);
     glad_glScissor = MakeStubImpl(glad_glScissor);
     glad_glSecondaryColor3f = MakeStubImpl(glad_glSecondaryColor3f);
+    glad_glSecondaryColorPointer = MakeStubImpl(glad_glSecondaryColorPointer);
     glad_glSelectBuffer = MakeStubImpl(glad_glSelectBuffer);
     glad_glShadeModel = MakeStubImpl(glad_glShadeModel);
     glad_glShaderSource = MakeStubImpl(glad_glShaderSource);
