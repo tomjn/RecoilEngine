@@ -647,6 +647,12 @@ Verified on the resource bar: the four panel accents, all four icons and the res
 
 1.67x slower here against 4.7x measured at 5120x2754, so most of what looked catastrophic was the window size. Run the harness windowed and small.
 
+> **Does not reproduce on the current pin, 2026-08-26.** Five consecutive 100 second runs of Splinter Faction from the fixed start script, windowed at 1400x850, peaked at 5934, 6013, 6062, 6197 and 6440 MiB of `phys_footprint` and all exited cleanly. `run-capped.sh` caps on footprint at 20 GiB and never fired once. At 5 GiB a second that cap trips in four seconds.
+>
+> The figures below carry no Mesa commit, which is exactly the trap `kk_mipmap_leak.c`'s header warns about, and they were taken before the pin existed. The most likely reading is that pinning to `56588ef0665` fixed this and nobody went back to check. What is *not* established is whether it is absent at other resolutions or on a busier scene, since these five runs are one scene with one unit. Treat the section below as a description of a Mesa that is no longer being used.
+>
+> An outside contributor measured 11 GiB peak on KosmicKrisp against 7.3 GiB on MoltenVK, same engine and same demo, on a base five weeks older than our pin. That is a real driver difference and it is nothing like 5 GiB a second either.
+
 **There is a severe memory leak, around 5 GiB per second, and RSS cannot see it.**
 
 GPU and system memory are the same silicon on Apple Silicon, so IOAccelerator allocations are real pressure. `ps -o rss` does not count them. Measured on one run, `phys_footprint` against RSS at the same instants:
@@ -664,7 +670,7 @@ RSS is flat at about 1.3 GiB the whole time. This is why an earlier claim here t
 
 Use `phys_footprint` for anything memory related here. `run-capped.sh` caps on it at 20 GiB, which clears the roughly 10 GiB that loading alone needs while stopping far short of a freeze, and logs RSS, `top`'s MEM and footprint side by side. `top`'s MEM counts reserved address space and is not a pressure measure either.
 
-This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.
+~~This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.~~ **Not true on the current pin.** 100 second runs are routine and hold steady around 6 GiB. Keep using `run-capped.sh` regardless, because the ceiling costs nothing and an uncapped run once froze a machine.
 
 **Ruled out, each by measurement. Do not retry these.**
 
