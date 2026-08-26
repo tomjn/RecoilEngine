@@ -3145,6 +3145,30 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float y1 = luaL_checkfloat(L, 2);
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
+
+	// Buffered like everything else rather than left as glRectf.
+	//
+	// glRectf is an immediate-mode primitive that never went through glBeginBatch,
+	// so it never got the flush that separates batches on a driver which merges
+	// them. That went unnoticed while everything after it was also immediate mode,
+	// and therefore also flushed. Once Lua drawing is buffered, a glDrawArrays
+	// follows it unseparated, and the driver loses the draws that follow.
+	//
+	// Measured with batch_merge_probe.c: glRectf followed by unflushed glDrawArrays
+	// is dirty in 30 frames of 30, and clean in 30 of 30 with a flush between.
+	// Emitting the quad through the accumulator removes the mixture instead of
+	// paying for another flush. The vertex order is the one glRect is defined to
+	// produce.
+	if (luaImmediateBuffering) {
+		LuaBatchBegin(GL_QUADS);
+		LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
+		LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
+		LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
+		LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
+		LuaBatchEnd();
+		return 0;
+	}
+
 	glRectf(x1, y1, x2, y2);
 	return 0;
 }

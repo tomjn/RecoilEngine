@@ -43,6 +43,7 @@ typedef void GLvoid;
 
 #define GL_COLOR_BUFFER_BIT   0x00004000
 #define GL_LINE_LOOP          0x0002
+#define GL_QUADS              0x0007
 #define GL_FLOAT              0x1406
 #define GL_RGBA               0x1908
 #define GL_UNSIGNED_BYTE      0x1401
@@ -77,6 +78,7 @@ static void (*p_glVertexPointer)(GLint, GLenum, GLsizei, const GLvoid*);
 static void (*p_glDrawArrays)(GLenum, GLint, GLsizei);
 static void (*p_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, GLvoid*);
 static void (*p_glPixelStorei)(GLenum, GLint);
+static void (*p_glRectf)(GLfloat, GLfloat, GLfloat, GLfloat);
 
 #define LOAD(name) do { \
 	p_##name = (void*) eglGetProcAddress(#name); \
@@ -171,8 +173,21 @@ enum Mode {
 	// the next batch's vertices.
 	MODE_ARRAYS_REUSED,
 
-	MODE_ARRAYS_REUSED_END
+	// glRectf for the first batch, arrays for the rest. gl.Rect goes through
+	// glRectf rather than glBegin, and the engine loses exactly the two batches
+	// that follow one. glBegin followed by arrays is already clean, so if this is
+	// not, the difference is glRectf specifically.
+	MODE_RECTF_FIRST
 };
+
+// The engine loses GL_QUADS, and every result here so far is GL_LINE_LOOP.
+// Primitive assembly is a different path, so it gets its own reference.
+static GLenum primType = GL_LINE_LOOP;
+
+// Draw batch 0 with glRectf instead of the mode's usual path. A flag rather than
+// a mode so the reference can draw it the same way and only the following
+// batches vary, which is the whole comparison.
+static int rectfFirstBatch = 0;
 
 // Change the current colour between batches with no colour array bound, which is
 // what a widget doing gl.Color then gl.BeginEnd produces. A batch that inherits
@@ -206,7 +221,7 @@ static void render(enum Mode mode, enum Separator sep)
 
 	const int anyArrays = (mode == MODE_ARRAYS || mode == MODE_ARRAYS_ARITY ||
 	                       mode == MODE_MIXED  || mode == MODE_ONE_IMMEDIATE ||
-	                       mode == MODE_ARRAYS_REUSED);
+	                       mode == MODE_ARRAYS_REUSED || mode == MODE_RECTF_FIRST);
 
 	if (anyArrays)
 		p_glEnableClientState(GL_VERTEX_ARRAY);
@@ -221,10 +236,22 @@ static void render(enum Mode mode, enum Separator sep)
 
 		if (mode == MODE_MIXED)
 			usesArrays = (b & 1);
-		else if (mode == MODE_ONE_IMMEDIATE)
+		else if (mode == MODE_ONE_IMMEDIATE || mode == MODE_RECTF_FIRST)
 			usesArrays = (b > 0);
 
 		separate(sep);
+
+		// glRectf is its own immediate-mode primitive and never passes through
+		// glBeginBatch, so nothing in the engine ever put a flush in front of it.
+		if (rectfFirstBatch && b == 0) {
+			const float x0 = ndcX(MARGIN);
+			const float y0 = ndcY(MARGIN);
+			const float x1 = ndcX(MARGIN + 2.0f * RADIUS);
+			const float y1 = ndcY(MARGIN + 2.0f * RADIUS);
+
+			p_glRectf(x0, y0, x1, y1);
+			continue;
+		}
 
 		// Alternate the current colour with no colour array bound, so a batch that
 		// inherits its neighbour's colour draws a whole circle in the wrong one
@@ -252,11 +279,11 @@ static void render(enum Mode mode, enum Separator sep)
 				p_glVertexPointer(4, GL_FLOAT, 0, &vert4[b * DIVS * 4]);
 			}
 
-			p_glDrawArrays(GL_LINE_LOOP, 0, DIVS);
+			p_glDrawArrays(primType, 0, DIVS);
 			continue;
 		}
 
-		p_glBegin(GL_LINE_LOOP);
+		p_glBegin(primType);
 		for (int c = 0; c < DIVS; c++) {
 			const float* v = &vert4[(b * DIVS + c) * 4];
 
@@ -375,7 +402,7 @@ int main(int argc, char** argv)
 	LOAD(glColor4f); LOAD(glFinish); LOAD(glFlush); LOAD(glDisable);
 	LOAD(glEnable); LOAD(glBlendFunc);
 	LOAD(glEnableClientState); LOAD(glDisableClientState); LOAD(glVertexPointer);
-	LOAD(glDrawArrays); LOAD(glReadPixels); LOAD(glPixelStorei);
+	LOAD(glDrawArrays); LOAD(glReadPixels); LOAD(glPixelStorei); LOAD(glRectf);
 
 	printf("GL_RENDERER = %s\n", (const char*) p_glGetString(GL_RENDERER));
 	printf("GL_VERSION  = %s\n", (const char*) p_glGetString(GL_VERSION));
@@ -439,6 +466,29 @@ int main(int argc, char** argv)
 	compare("arrays,    no separator",         MODE_ARRAYS,    SEP_NONE, iterations);
 	compare("arrays,    reused buffer",        MODE_ARRAYS_REUSED, SEP_NONE, iterations);
 	recolourEachBatch = 0;
+
+	// GL_QUADS, which is what the engine loses. Its own reference, because the
+	// shapes differ from the line loops above.
+	printf("\nGL_QUADS instead of GL_LINE_LOOP\n");
+	primType = GL_QUADS;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	compare("quads, immediate, flush  (ref)",   MODE_IMMEDIATE, SEP_FLUSH, iterations);
+	compare("quads, immediate, no separator",   MODE_IMMEDIATE, SEP_NONE, iterations);
+	compare("quads, arrays, no separator",      MODE_ARRAYS,    SEP_NONE, iterations);
+
+	// glRectf first, then arrays, in quads. This is the engine's exact sequence.
+	printf("\nglRectf then arrays, the engine's own sequence\n");
+	rectfFirstBatch = 1;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	compare("rectf then immediate, flush (ref)", MODE_IMMEDIATE, SEP_FLUSH, iterations);
+	compare("rectf then arrays, no separator",   MODE_ARRAYS,    SEP_NONE, iterations);
+	compare("rectf then arrays, flush",          MODE_ARRAYS,    SEP_FLUSH, iterations);
+	rectfFirstBatch = 0;
+	primType = GL_LINE_LOOP;
 
 	return 0;
 }

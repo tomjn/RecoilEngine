@@ -261,6 +261,32 @@ The noise floor is the profiler text and the unit animating, both of which diffe
 
 This does not prove pixel identity. It proves any difference is below about 0.01% on static UI.
 
+### `glRectf` followed by `glDrawArrays` loses draws, found 2026-08-26
+
+The defect buffering exposed, and the reason `gl.Rect` is now buffered too.
+
+`gl.Rect` goes through `glRectf`, an immediate-mode primitive that never passed through `glBeginBatch` and so never received the flush. That was invisible while everything after it was also immediate mode, and therefore also flushed. Buffering changed what follows into `glDrawArrays`, and that pair is the one the driver gets wrong.
+
+| Case, `batch_merge_probe.c`, GL_QUADS | Dirty frames | Missing pixels |
+|---|---|---|
+| `glRectf` then immediate, flush, reference | 0 of 30 | 0 |
+| **`glRectf` then arrays, no separator** | **30 of 30** | **1,439,280** |
+| `glRectf` then arrays, flush | 0 of 30 | 0 |
+
+Also worth noting from the same run: `GL_QUADS` immediate mode with no separator is clean 30 of 30, so the original merging defect does not fire for quads at all. The mitigation was characterised entirely on line loops.
+
+The fix routes `gl.Rect` through the accumulator instead of adding another flush, which removes the mixture rather than paying for it.
+
+**How it was found, because the method mattered more than the result.** It presented as a display list bug for hours. A widget drawing one figure twice a frame, once through a list and once directly, showed the list copy losing its first two batches. Drawing the direct copy first moved the artefact to the direct copy, which proved it followed draw order and had nothing to do with lists.
+
+Three false readings came before that, all from a flat backdrop:
+
+- black backdrop, quads read as dropped, they were the wrong colour
+- orange backdrop, quads read as dropped, indistinguishable from being drawn in the backdrop colour
+- a cyan sentinel before the call did not separate them either, because the sentinel was lost as well
+
+A striped backdrop separated them, and then suppressed the artefact, because the fifty extra `gl.Rect` calls changed what was being measured. Watching the live window was what showed the squares flickering in occasionally, which no single screenshot could.
+
 ### `glDrawArrays` does not merge, tested 2026-08-26
 
 The question that gates item 1. If a buffered draw merged the way `glBegin` does, the flush would survive the rewrite and most of the win with it.

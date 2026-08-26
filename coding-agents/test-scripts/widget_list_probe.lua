@@ -57,6 +57,9 @@ local RECOMPILE_EACH_FRAME = false
 -- Draw the rows bottom to top instead of top to bottom.
 local REVERSE_ROWS = true
 
+-- Draw the direct copy before the list copy.
+local DIRECT_FIRST = true
+
 local theList
 
 local function Quad(x1, y1, x2, y2)
@@ -156,16 +159,11 @@ function widget:DrawScreen()
 	local by1 = ORIGIN_Y - 10
 	local by2 = ORIGIN_Y + (ROWS * ROW_STEP) + 10
 
-	local band = 0
-	for y = by1, by2, 16 do
-		if band % 2 == 0 then
-			gl.Color(1.0, 0.45, 0.0, 1)
-		else
-			gl.Color(0.0, 0.15, 0.5, 1)
-		end
-		gl.Rect(bx1, y, bx2, math.min(y + 16, by2))
-		band = band + 1
-	end
+	-- Flat, deliberately. Striping it took the artefact from 4658 differing pixels
+	-- to 1471, so the fifty extra gl.Rect calls were changing what was being
+	-- measured. One rect keeps the reproduction.
+	gl.Color(1.0, 0.45, 0.0, 1)
+	gl.Rect(bx1, by1, bx2, by2)
 
 	-- REVERSE_ROWS separates "first call after the list was built" from "bottom of
 	-- the screen". The first row drawn loses two batches, and those two things are
@@ -180,15 +178,31 @@ function widget:DrawScreen()
 		-- ignored colour got read as a dropped batch twice in a row.
 		gl.Color(0, 1, 1, 1)
 
-		gl.PushMatrix()
-		gl.Translate(ORIGIN_X, y, 0)
-		gl.CallList(theList)
-		gl.PopMatrix()
+		-- DIRECT_FIRST decides which copy is drawn first. The list copy was always
+		-- first until now, so "the list is broken" and "whatever is drawn first is
+		-- broken" have never been told apart. If the artefact follows the order
+		-- rather than the list, this is not about display lists at all.
+		local function DrawList()
+			gl.PushMatrix()
+			gl.Translate(ORIGIN_X, y, 0)
+			gl.CallList(theList)
+			gl.PopMatrix()
+		end
 
-		gl.PushMatrix()
-		gl.Translate(ORIGIN_X + W + GAP, y, 0)
-		Figure()
-		gl.PopMatrix()
+		local function DrawDirect()
+			gl.PushMatrix()
+			gl.Translate(ORIGIN_X + W + GAP, y, 0)
+			Figure()
+			gl.PopMatrix()
+		end
+
+		if DIRECT_FIRST then
+			DrawDirect()
+			DrawList()
+		else
+			DrawList()
+			DrawDirect()
+		end
 	end
 
 	gl.Color(1, 1, 1, 1)
