@@ -28,6 +28,7 @@
 #include "LuaFonts.h"
 #include "LuaHandle.h"
 #include "LuaHashString.h"
+#include "LuaImmediateBatch.h"
 #include "LuaIO.h"
 #include "LuaOpenGLUtils.h"
 #include "LuaRBOs.h"
@@ -84,6 +85,7 @@
 
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
+CONFIG(bool, LuaImmediateModeBuffering).defaultValue(true).description("Collect each gl.BeginEnd block and draw it with one glDrawArrays instead of one call a vertex. Set to false to restore the glBegin path.");
 
 /*** Callouts for OpenGL API
  *
@@ -101,6 +103,11 @@ LuaOpenGL::DrawMode LuaOpenGL::prevDrawMode = LuaOpenGL::DRAW_NONE;
 bool  LuaOpenGL::safeMode = true;
 bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
+
+// Lua drawing is single threaded on the draw thread and every Lua state shares
+// one GL context, so one accumulator serves them all.
+static bool luaImmediateBuffering = true;
+static LuaImmediateBatch luaBatch;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -250,6 +257,130 @@ static CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 
 
 
+// Reads the value an attribute held when a block began, so vertices emitted
+// before the block set it can be back-filled. Only reached on that path, so the
+// glGetFloatv sync point stays off the hot path.
+static void FetchBatchDefault(BatchAttr attr, unsigned unit, float* out)
+{
+	switch (attr) {
+		case BatchAttr::Color:          glGetFloatv(GL_CURRENT_COLOR, out); break;
+		case BatchAttr::Normal:         glGetFloatv(GL_CURRENT_NORMAL, out); break;
+		case BatchAttr::SecondaryColor: glGetFloatv(GL_CURRENT_SECONDARY_COLOR, out); break;
+		case BatchAttr::FogCoord:       glGetFloatv(GL_CURRENT_FOG_COORD, out); break;
+
+		case BatchAttr::TexCoord: {
+			GLint prevUnit = GL_TEXTURE0;
+			glGetIntegerv(GL_ACTIVE_TEXTURE, &prevUnit);
+			glActiveTexture(GL_TEXTURE0 + unit);
+			glGetFloatv(GL_CURRENT_TEXTURE_COORDS, out);
+			glActiveTexture(prevUnit);
+		} break;
+
+		case BatchAttr::EdgeFlag: {
+			GLboolean flag = GL_TRUE;
+			glGetBooleanv(GL_EDGE_FLAG, &flag);
+			out[0] = (flag == GL_TRUE) ? 1.0f : 0.0f;
+		} break;
+	}
+}
+
+// Turns a finished block into one draw.
+//
+// Every pointer size is fixed and never varies between draws. Varying
+// glVertexPointer's size corrupts the frame on KosmicKrisp, measured at 30
+// frames of 30, while varying only the address is clean. That is legal GL the
+// driver gets wrong, so the constraint is worth stating rather than assuming.
+static void IssueBatch(const BatchLayout& b)
+{
+	if (b.count == 0)
+		return;
+
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(4, GL_FLOAT, 0, b.pos);
+
+	if (b.color != nullptr) {
+		glEnableClientState(GL_COLOR_ARRAY);
+		glColorPointer(4, GL_FLOAT, 0, b.color);
+	}
+	if (b.normal != nullptr) {
+		glEnableClientState(GL_NORMAL_ARRAY);
+		glNormalPointer(GL_FLOAT, 0, b.normal);
+	}
+	if (b.secColor != nullptr) {
+		glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+		glSecondaryColorPointer(3, GL_FLOAT, 0, b.secColor);
+	}
+	if (b.fogCoord != nullptr) {
+		glEnableClientState(GL_FOG_COORD_ARRAY);
+		glFogCoordPointer(GL_FLOAT, 0, b.fogCoord);
+	}
+	if (b.edgeFlag != nullptr) {
+		glEnableClientState(GL_EDGE_FLAG_ARRAY);
+		glEdgeFlagPointer(0, b.edgeFlag);
+	}
+
+	int lastTexUnit = -1;
+
+	for (int unit = 0; unit < BatchLayout::MAX_TEX_UNITS; unit++) {
+		if (b.texCoord[unit] == nullptr)
+			continue;
+
+		glClientActiveTexture(GL_TEXTURE0 + unit);
+		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+		glTexCoordPointer(4, GL_FLOAT, 0, b.texCoord[unit]);
+		lastTexUnit = unit;
+	}
+
+	glDrawArrays(b.mode, 0, b.count);
+
+	for (int unit = 0; unit <= lastTexUnit; unit++) {
+		if (b.texCoord[unit] == nullptr)
+			continue;
+
+		glClientActiveTexture(GL_TEXTURE0 + unit);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	}
+
+	if (lastTexUnit >= 0)
+		glClientActiveTexture(GL_TEXTURE0);
+
+	if (b.edgeFlag != nullptr) glDisableClientState(GL_EDGE_FLAG_ARRAY);
+	if (b.fogCoord != nullptr) glDisableClientState(GL_FOG_COORD_ARRAY);
+	if (b.secColor != nullptr) glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+	if (b.normal   != nullptr) glDisableClientState(GL_NORMAL_ARRAY);
+	if (b.color    != nullptr) glDisableClientState(GL_COLOR_ARRAY);
+
+	glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+// The pair that replaces glBeginBatch and glEnd at the Lua block sites.
+static void LuaBatchBegin(GLenum mode)
+{
+	if (!luaImmediateBuffering)
+		return glBeginBatch(mode);
+
+	luaBatch.Begin(mode);
+}
+
+static void LuaBatchEnd()
+{
+	if (!luaImmediateBuffering)
+		return glEnd();
+
+	BatchLayout layout;
+
+	if (!luaBatch.End(layout))
+		return;
+
+	IssueBatch(layout);
+
+	// A colour set inside a block persists after it in real GL. One call at the
+	// end reproduces that without paying for one a vertex, and it has to happen
+	// even when the block drew nothing.
+	if (layout.colorSet)
+		glColor4fv(layout.finalColor);
+}
+
 static inline void glTexCoordNarrow(float x, float y, float z, float w, int arity)
 {
 	switch (arity) {
@@ -270,6 +401,9 @@ static inline void glTexCoordNarrow(float x, float y, float z, float w, int arit
 // coordinate, the same as widening a vertex.
 static inline void LuaTexCoordN(float x, float y, float z, float w, int arity)
 {
+	if (luaBatch.Active())
+		return luaBatch.TexCoord(0, x, y, z, w);
+
 	if (globalRendering->supportImmediateModeBatching)
 		return glTexCoordNarrow(x, y, z, w, arity);
 
@@ -292,6 +426,9 @@ static inline void glMultiTexCoordNarrow(GLenum unit, float x, float y, float z,
 // single float and an edge flag is a boolean, so none of those can vary.
 static inline void LuaMultiTexCoordN(GLenum unit, float x, float y, float z, float w, int arity)
 {
+	if (luaBatch.Active())
+		return luaBatch.TexCoord(unit - GL_TEXTURE0, x, y, z, w);
+
 	if (globalRendering->supportImmediateModeBatching)
 		return glMultiTexCoordNarrow(unit, x, y, z, w, arity);
 
@@ -312,6 +449,12 @@ static inline void glVertexNarrow(float x, float y, float z, float w, int arity)
 // interleaved, watching the load screen.
 static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 {
+	// Buffered, arity does not arise. The vertex goes into a four float slot and
+	// the whole block is drawn with one glVertexPointer of a size that never
+	// varies, which is what the widening below was standing in for.
+	if (luaBatch.Active())
+		return luaBatch.Vertex(x, y, z, w);
+
 	// Gated on the measured capability, the same way the flush is, so a driver
 	// that renders batches correctly pays nothing. Widening every vertex to four
 	// floats is cheap but it is on the hot path for all Lua drawing, and no other
@@ -322,6 +465,48 @@ static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 	glVertex4f(x, y, z, w);
 }
 
+// The remaining per-vertex attributes. None of them can vary its arity, so these
+// exist only to route the value into the accumulator when a block is open.
+static inline void LuaColor4fv(const float* rgba)
+{
+	if (luaBatch.Active())
+		return luaBatch.Color(rgba);
+
+	glColor4fv(rgba);
+}
+
+static inline void LuaNormal3f(float x, float y, float z)
+{
+	if (luaBatch.Active())
+		return luaBatch.Normal(x, y, z);
+
+	glNormal3f(x, y, z);
+}
+
+static inline void LuaSecondaryColor3f(float r, float g, float b)
+{
+	if (luaBatch.Active())
+		return luaBatch.SecondaryColor(r, g, b);
+
+	glSecondaryColor3f(r, g, b);
+}
+
+static inline void LuaFogCoordf(float f)
+{
+	if (luaBatch.Active())
+		return luaBatch.FogCoord(f);
+
+	glFogCoordf(f);
+}
+
+static inline void LuaEdgeFlag(bool e)
+{
+	if (luaBatch.Active())
+		return luaBatch.EdgeFlag(e);
+
+	glEdgeFlag(e);
+}
+
 /******************************************************************************/
 /******************************************************************************/
 
@@ -330,6 +515,9 @@ void LuaOpenGL::Init()
 	glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
 
 	canUseShaders = configHandler->GetBool("LuaShaders");
+
+	luaImmediateBuffering = configHandler->GetBool("LuaImmediateModeBuffering");
+	luaBatch.SetDefaultFetch(FetchBatchDefault);
 
 	deprecatedGLWarnLevel = configHandler->GetInt("DeprecatedGLWarnLevel");
 	if (deprecatedGLWarnLevel == 1)
@@ -2261,7 +2449,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const int xit = xib + 1;
 			const float xb = xib * SQUARE_SIZE;
 			const float xt = xb + SQUARE_SIZE;
-			glBeginBatch(GL_TRIANGLE_STRIP);
+			LuaBatchBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -2270,7 +2458,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				LuaVertexN(xt, yt, z, 1.0f, 3);
 				LuaVertexN(xb, yb, z, 1.0f, 3);
 			}
-			glEnd();
+			LuaBatchEnd();
 		}
 	} else {
 		const float tuStep = (tu1 - tu0) / float(xie - xis);
@@ -2284,7 +2472,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const float xt = xb + SQUARE_SIZE;
 			const float tut = tub + tuStep;
 			float tv = tv0;
-			glBeginBatch(GL_TRIANGLE_STRIP);
+			LuaBatchBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -2296,7 +2484,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				LuaVertexN(xb, yb, z, 1.0f, 3);
 				tv += tvStep;
 			}
-			glEnd();
+			LuaBatchEnd();
 			tub += tuStep;
 		}
 	}
@@ -2409,7 +2597,7 @@ int LuaOpenGL::Shape(lua_State* L)
 
 	const GLuint type = (GLuint)luaL_checkint(L, 1);
 
-	glBeginBatch(type);
+	LuaBatchBegin(type);
 
 	const int table = 2;
 	int i = 1;
@@ -2421,9 +2609,9 @@ int LuaOpenGL::Shape(lua_State* L)
 			luaL_error(L, "Shape: bad vertex data");
 			break;
 		}
-		if (vd.hasColor) { glColor4fv(vd.color);   }
+		if (vd.hasColor) { LuaColor4fv(vd.color);   }
 		if (vd.hasTxcd)  { LuaTexCoordN(vd.txcd[0], vd.txcd[1], 0.0f, 1.0f, 2); }
-		if (vd.hasNorm)  { glNormal3fv(vd.norm); }
+		if (vd.hasNorm)  { LuaNormal3f(vd.norm[0], vd.norm[1], vd.norm[2]); }
 		if (vd.hasVert)  { LuaVertexN(vd.vert[0], vd.vert[1], vd.vert[2], 1.0f, 3); } // always last
 	}
 	if (!lua_isnil(L, -1)) {
@@ -2431,7 +2619,7 @@ int LuaOpenGL::Shape(lua_State* L)
 	}
 	// lua_pop(L, 1);
 
-	glEnd();
+	LuaBatchEnd();
 
 	return 0;
 }
@@ -2461,9 +2649,9 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	}
 
 	// call the function
-	glBeginBatch(primMode);
+	LuaBatchBegin(primMode);
 	const int error = lua_pcall(L, (args - 2), 0, 0);
-	glEnd();
+	LuaBatchEnd();
 
 	if (error != 0) {
 		LOG_L(L_ERROR, "gl.BeginEnd: error(%i) = %s",
@@ -2594,14 +2782,14 @@ int LuaOpenGL::Normal(lua_State* L)
 			luaL_error(L, "Bad data passed to gl.Normal()");
 		}
 		const float z = lua_tofloat(L, -1);
-		glNormal3f(x, y, z);
+		LuaNormal3f(x, y, z);
 		return 0;
 	}
 
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
-	glNormal3f(x, y, z);
+	LuaNormal3f(x, y, z);
 	return 0;
 }
 
@@ -2835,14 +3023,14 @@ int LuaOpenGL::SecondaryColor(lua_State* L)
 			luaL_error(L, "Bad data passed to gl.SecondaryColor()");
 		}
 		const float z = lua_tofloat(L, -1);
-		glSecondaryColor3f(x, y, z);
+		LuaSecondaryColor3f(x, y, z);
 		return 0;
 	}
 
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
-	glSecondaryColor3f(x, y, z);
+	LuaSecondaryColor3f(x, y, z);
 	return 0;
 }
 
@@ -2857,7 +3045,7 @@ int LuaOpenGL::FogCoord(lua_State* L)
 	CondWarnDeprecatedGL(L, __func__);
 
 	const float value = luaL_checkfloat(L, 1);
-	glFogCoordf(value);
+	LuaFogCoordf(value);
 	return 0;
 }
 
@@ -2872,7 +3060,7 @@ int LuaOpenGL::EdgeFlag(lua_State* L)
 	CondWarnDeprecatedGL(L, __func__);
 
 	if (lua_isboolean(L, 1)) {
-		glEdgeFlag(lua_toboolean(L, 1));
+		LuaEdgeFlag(lua_toboolean(L, 1) != 0);
 	}
 	return 0;
 }
@@ -2949,13 +3137,13 @@ int LuaOpenGL::TexRect(lua_State* L)
 			t1 = 0.0f;
 			t2 = 1.0f;
 		}
-		glBeginBatch(GL_QUADS); {
+		LuaBatchBegin(GL_QUADS); {
 			LuaTexCoordN(s1, t1, 0.0f, 1.0f, 2); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s2, t1, 0.0f, 1.0f, 2); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s2, t2, 0.0f, 1.0f, 2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s1, t2, 0.0f, 1.0f, 2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 		}
-		glEnd();
+		LuaBatchEnd();
 		return 0;
 	}
 
@@ -2963,13 +3151,13 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const float t1 = luaL_checkfloat(L, 6);
 	const float s2 = luaL_checkfloat(L, 7);
 	const float t2 = luaL_checkfloat(L, 8);
-	glBeginBatch(GL_QUADS); {
+	LuaBatchBegin(GL_QUADS); {
 		LuaTexCoordN(s1, t1, 0.0f, 1.0f, 2); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s2, t1, 0.0f, 1.0f, 2); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s2, t2, 0.0f, 1.0f, 2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s1, t2, 0.0f, 1.0f, 2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 	}
-	glEnd();
+	LuaBatchEnd();
 
 	return 0;
 }
@@ -3081,7 +3269,7 @@ int LuaOpenGL::Color(lua_State* L)
 		luaL_error(L, "Incorrect arguments to gl.Color()");
 	}
 
-	glColor4fv(color.data());
+	LuaColor4fv(color.data());
 
 	return 0;
 }

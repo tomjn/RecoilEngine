@@ -30,6 +30,12 @@ struct BatchLayout {
 	const uint8_t* edgeFlag = nullptr; // 1
 
 	const float* texCoord[MAX_TEX_UNITS] = {}; // 4 each
+
+	// A colour set inside a block stays current after it in real GL, so it has to
+	// be reported apart from the vertex array. A block can set a colour and then
+	// emit no vertices, and that colour still has to survive.
+	bool colorSet = false;
+	float finalColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 };
 
 enum class BatchAttr { Color, Normal, SecondaryColor, FogCoord, EdgeFlag, TexCoord };

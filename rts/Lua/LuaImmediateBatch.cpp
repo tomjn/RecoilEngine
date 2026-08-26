@@ -163,6 +163,14 @@ bool LuaImmediateBatch::End(BatchLayout& out)
 	out.mode = mode;
 	out.count = count;
 
+	// Reported whatever the vertex count, because the colour outlives the block.
+	if (color.active) {
+		out.colorSet = true;
+
+		for (int i = 0; i < 4; i++)
+			out.finalColor[i] = color.value[i];
+	}
+
 	if (count == 0)
 		return true;
 

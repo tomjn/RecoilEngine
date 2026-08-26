@@ -223,6 +223,58 @@ TEST_CASE("every attribute kind round-trips", "[LuaImmediateBatch]")
 	CHECK(layout.edgeFlag[0] == 0);
 }
 
+TEST_CASE("a colour set in a block survives the block", "[LuaImmediateBatch]")
+{
+	// In real GL a colour set between glBegin and glEnd stays current afterwards.
+	// It has to be reported separately from the vertex array, because a block can
+	// set a colour and then draw nothing.
+	LuaImmediateBatch batch;
+	BatchLayout layout;
+	batch.SetDefaultFetch(StubDefaults);
+
+	const float red[4]  = { 1.0f, 0.0f, 0.0f, 1.0f };
+	const float blue[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+
+	batch.Begin(7);
+	batch.Color(red);
+	batch.Vertex(0.0f, 0.0f, 0.0f, 1.0f);
+	batch.Color(blue);
+	batch.Vertex(1.0f, 0.0f, 0.0f, 1.0f);
+	REQUIRE(batch.End(layout));
+
+	CHECK(layout.colorSet);
+	CHECK(layout.finalColor[2] == 1.0f);
+}
+
+TEST_CASE("a colour survives a block that drew nothing", "[LuaImmediateBatch]")
+{
+	LuaImmediateBatch batch;
+	BatchLayout layout;
+	batch.SetDefaultFetch(StubDefaults);
+
+	const float red[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+
+	batch.Begin(7);
+	batch.Color(red);
+	REQUIRE(batch.End(layout));
+
+	CHECK(layout.count == 0);
+	CHECK(layout.colorSet);
+	CHECK(layout.finalColor[0] == 1.0f);
+}
+
+TEST_CASE("a block that sets no colour reports none", "[LuaImmediateBatch]")
+{
+	LuaImmediateBatch batch;
+	BatchLayout layout;
+
+	batch.Begin(7);
+	batch.Vertex(0.0f, 0.0f, 0.0f, 1.0f);
+	REQUIRE(batch.End(layout));
+
+	CHECK_FALSE(layout.colorSet);
+}
+
 TEST_CASE("attributes do not leak into the next block", "[LuaImmediateBatch]")
 {
 	LuaImmediateBatch batch;
