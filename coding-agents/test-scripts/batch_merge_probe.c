@@ -108,6 +108,9 @@ static void (*p_glPixelStorei)(GLenum, GLint);
 static float vert2[BATCHES * DIVS * 2];
 static float vert4[BATCHES * DIVS * 4];
 
+// One batch worth, refilled per draw for MODE_ARRAYS_REUSED.
+static float scratch[DIVS * 4];
+
 static unsigned char* reference;
 static unsigned char* current;
 
@@ -150,8 +153,36 @@ enum Mode {
 	MODE_IMMEDIATE,        // glBegin per batch, every vertex widened to 4 floats
 	MODE_IMMEDIATE_ARITY,  // glBegin per batch, arity alternating 2 and 4
 	MODE_ARRAYS,           // one glDrawArrays per batch, pointer size always 4
-	MODE_ARRAYS_ARITY      // one glDrawArrays per batch, pointer size alternating 2 and 4
+	MODE_ARRAYS_ARITY,     // one glDrawArrays per batch, pointer size alternating 2 and 4
+
+	// The combination the engine actually produces once Lua drawing is buffered.
+	// gl.Rect goes through glRectf, which is an immediate-mode batch and never
+	// went through glBeginBatch, so it never got the flush. Everything else is
+	// glDrawArrays. Neither of the two cases above covers that mix, and a run
+	// where one immediate-mode batch preceded the buffered draws lost the first
+	// two of them.
+	MODE_MIXED,            // alternating glBegin and glDrawArrays batches
+	MODE_ONE_IMMEDIATE,    // a single glBegin batch first, then all glDrawArrays
+
+	// One buffer refilled per batch rather than a separate array each. This is
+	// what LuaImmediateBatch does, since it clears and reuses its vectors, and it
+	// is the closest untested difference between this probe and the engine. If the
+	// driver reads client array data lazily rather than at the draw, a batch gets
+	// the next batch's vertices.
+	MODE_ARRAYS_REUSED,
+
+	MODE_ARRAYS_REUSED_END
 };
+
+// Change the current colour between batches with no colour array bound, which is
+// what a widget doing gl.Color then gl.BeginEnd produces. A batch that inherits
+// the previous colour is the defect the amplifier's --alt mode found for
+// immediate mode, and it has never been checked for arrays.
+//
+// A flag rather than a mode, because the comparison needs its own reference. The
+// alternating colours are the expected output here, not a defect, so the
+// reference has to be immediate mode drawn the same way.
+static int recolourEachBatch = 0;
 
 enum Separator {
 	SEP_NONE,
@@ -173,9 +204,11 @@ static void render(enum Mode mode, enum Separator sep)
 	p_glClear(GL_COLOR_BUFFER_BIT);
 	p_glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 
-	const int usesArrays = (mode == MODE_ARRAYS || mode == MODE_ARRAYS_ARITY);
+	const int anyArrays = (mode == MODE_ARRAYS || mode == MODE_ARRAYS_ARITY ||
+	                       mode == MODE_MIXED  || mode == MODE_ONE_IMMEDIATE ||
+	                       mode == MODE_ARRAYS_REUSED);
 
-	if (usesArrays)
+	if (anyArrays)
 		p_glEnableClientState(GL_VERTEX_ARRAY);
 
 	for (int b = 0; b < BATCHES; b++) {
@@ -183,15 +216,41 @@ static void render(enum Mode mode, enum Separator sep)
 		// neighbours has them, and one that needs two like neighbours also has them.
 		const int narrow = (b & 1);
 
+		// Which path this particular batch takes.
+		int usesArrays = anyArrays;
+
+		if (mode == MODE_MIXED)
+			usesArrays = (b & 1);
+		else if (mode == MODE_ONE_IMMEDIATE)
+			usesArrays = (b > 0);
+
 		separate(sep);
+
+		// Alternate the current colour with no colour array bound, so a batch that
+		// inherits its neighbour's colour draws a whole circle in the wrong one
+		// rather than a few stray pixels.
+		if (recolourEachBatch) {
+			if (narrow)
+				p_glColor4f(1.0f, 0.0f, 1.0f, 1.0f);
+			else
+				p_glColor4f(0.0f, 1.0f, 1.0f, 1.0f);
+		}
 
 		if (usesArrays) {
 			// The engine's buffered path would set the pointer once per gl.BeginEnd
 			// block and issue one draw, so the probe does the same per batch.
-			if (mode == MODE_ARRAYS_ARITY && narrow)
+			if (mode == MODE_ARRAYS_ARITY && narrow) {
 				p_glVertexPointer(2, GL_FLOAT, 0, &vert2[b * DIVS * 2]);
-			else
+			}
+			else if (mode == MODE_ARRAYS_REUSED) {
+				// Refill one buffer instead of pointing at a fresh array, the way
+				// LuaImmediateBatch reuses its vectors.
+				memcpy(scratch, &vert4[b * DIVS * 4], sizeof(float) * DIVS * 4);
+				p_glVertexPointer(4, GL_FLOAT, 0, scratch);
+			}
+			else {
 				p_glVertexPointer(4, GL_FLOAT, 0, &vert4[b * DIVS * 4]);
+			}
 
 			p_glDrawArrays(GL_LINE_LOOP, 0, DIVS);
 			continue;
@@ -209,7 +268,7 @@ static void render(enum Mode mode, enum Separator sep)
 		p_glEnd();
 	}
 
-	if (usesArrays)
+	if (anyArrays)
 		p_glDisableClientState(GL_VERTEX_ARRAY);
 
 	p_glFinish();
@@ -234,8 +293,11 @@ static void compare(const char* label, enum Mode mode, enum Separator sep, int i
 	int totalExtra = 0;
 	int totalMissing = 0;
 	int worstExtra = 0;
+	int totalMiscoloured = 0;
 
 	for (int it = 0; it < iterations; it++) {
+		int miscoloured = 0;
+
 		render(mode, sep);
 		readback(current);
 
@@ -248,17 +310,28 @@ static void compare(const char* label, enum Mode mode, enum Separator sep, int i
 
 			if (curLit && !refLit) extra++;
 			if (refLit && !curLit) missing++;
+
+			// Lit in both but a different colour. Scoring only lit against unlit
+			// meant a batch drawn in its neighbour's colour counted as a pass,
+			// which is exactly the defect this probe was later asked to find.
+			if (refLit && curLit) {
+				if (reference[p * 4 + 0] != current[p * 4 + 0] ||
+				    reference[p * 4 + 1] != current[p * 4 + 1] ||
+				    reference[p * 4 + 2] != current[p * 4 + 2])
+					miscoloured++;
+			}
 		}
 
-		if (extra > 0 || missing > 0) dirtyFrames++;
+		if (extra > 0 || missing > 0 || miscoloured > 0) dirtyFrames++;
 		if (extra > worstExtra) worstExtra = extra;
 
 		totalExtra += extra;
 		totalMissing += missing;
+		totalMiscoloured += miscoloured;
 	}
 
-	printf("%-34s  dirty %3d/%-3d  extra %7d total %6d worst  missing %7d   err 0x%04x\n",
-		label, dirtyFrames, iterations, totalExtra, worstExtra, totalMissing, p_glGetError());
+	printf("%-34s  dirty %3d/%-3d  extra %8d  missing %8d  wrong colour %8d   err 0x%04x\n",
+		label, dirtyFrames, iterations, totalExtra, totalMissing, totalMiscoloured, p_glGetError());
 }
 
 int main(int argc, char** argv)
@@ -344,6 +417,28 @@ int main(int argc, char** argv)
 	compare("arrays,    flush",               MODE_ARRAYS,       SEP_FLUSH, iterations);
 	compare("arrays,    varying pointer size", MODE_ARRAYS_ARITY, SEP_NONE, iterations);
 	compare("immediate, varying arity, flush", MODE_IMMEDIATE_ARITY, SEP_FLUSH, iterations);
+
+	printf("\nmixing the two, which is what the engine now emits\n");
+	compare("mixed immediate and arrays",      MODE_MIXED,         SEP_NONE, iterations);
+	compare("mixed, flush",                    MODE_MIXED,         SEP_FLUSH, iterations);
+	compare("one immediate then all arrays",   MODE_ONE_IMMEDIATE, SEP_NONE, iterations);
+	compare("one immediate then all, flush",   MODE_ONE_IMMEDIATE, SEP_FLUSH, iterations);
+
+	printf("\none buffer refilled per batch, as LuaImmediateBatch does\n");
+	compare("arrays, reused buffer",           MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+	compare("arrays, reused buffer, flush",    MODE_ARRAYS_REUSED, SEP_FLUSH, iterations);
+
+	// Its own reference, because the alternating colours are the wanted output.
+	printf("\ncurrent colour changed between batches, no colour array\n");
+	recolourEachBatch = 1;
+	render(MODE_IMMEDIATE, SEP_FLUSH);
+	readback(reference);
+
+	compare("immediate, flush   (reference)",  MODE_IMMEDIATE, SEP_FLUSH, iterations);
+	compare("immediate, no separator",         MODE_IMMEDIATE, SEP_NONE, iterations);
+	compare("arrays,    no separator",         MODE_ARRAYS,    SEP_NONE, iterations);
+	compare("arrays,    reused buffer",        MODE_ARRAYS_REUSED, SEP_NONE, iterations);
+	recolourEachBatch = 0;
 
 	return 0;
 }

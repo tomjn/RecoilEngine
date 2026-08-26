@@ -216,7 +216,7 @@ A run peaks near 8 GiB on 16 GB of RAM. A leaking driver reaches 54 GB and freez
 
 ### Lua buffering measured, and where the rest of the win is, 2026-08-26
 
-**All figures on the external 4K panel, so they do not compare to anything above.** Mesa `56588ef0665`, SplinterFaction, frozen scene, 3024x1832 backing, `SPRING_FPS_LOG=5`, mean of the last six samples a run.
+**All figures on the external 5120x2880 panel, the only active display, at 2x scaling, so they do not compare to anything above.** Mesa `56588ef0665`, SplinterFaction, frozen scene, 3024x1832 backing, `SPRING_FPS_LOG=5`, mean of the last six samples a run.
 
 | Configuration | fps | frame | Runs |
 |---|---|---|---|

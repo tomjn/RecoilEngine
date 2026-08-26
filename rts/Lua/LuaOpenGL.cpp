@@ -298,42 +298,72 @@ static void IssueBatch(const BatchLayout& b)
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glVertexPointer(4, GL_FLOAT, 0, b.pos);
 
+	// Every array this draw does not use has to be turned off, not merely left
+	// alone. Client array enables are global state that other drawing leaves
+	// behind, and an array left on feeds this draw from a pointer that has
+	// nothing to do with it. A block that sets no colour then takes its colours
+	// from whatever array was last bound instead of from the current colour,
+	// which showed up as quads drawn in the previous colour rather than their own.
 	if (b.color != nullptr) {
 		glEnableClientState(GL_COLOR_ARRAY);
 		glColorPointer(4, GL_FLOAT, 0, b.color);
+	} else {
+		glDisableClientState(GL_COLOR_ARRAY);
 	}
 	if (b.normal != nullptr) {
 		glEnableClientState(GL_NORMAL_ARRAY);
 		glNormalPointer(GL_FLOAT, 0, b.normal);
+	} else {
+		glDisableClientState(GL_NORMAL_ARRAY);
 	}
 	if (b.secColor != nullptr) {
 		glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
 		glSecondaryColorPointer(3, GL_FLOAT, 0, b.secColor);
+	} else {
+		glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
 	}
 	if (b.fogCoord != nullptr) {
 		glEnableClientState(GL_FOG_COORD_ARRAY);
 		glFogCoordPointer(GL_FLOAT, 0, b.fogCoord);
+	} else {
+		glDisableClientState(GL_FOG_COORD_ARRAY);
 	}
 	if (b.edgeFlag != nullptr) {
 		glEnableClientState(GL_EDGE_FLAG_ARRAY);
 		glEdgeFlagPointer(0, b.edgeFlag);
+	} else {
+		glDisableClientState(GL_EDGE_FLAG_ARRAY);
 	}
 
-	int lastTexUnit = -1;
+	// Texture coordinate arrays need clearing for the same reason, but only where
+	// something plausibly left one on. Fixed function drawing uses the low units,
+	// so guard those every time and leave the rest to the pair below. Sweeping all
+	// thirty two would be sixty four calls a batch for units nothing touches.
+	static constexpr int GUARDED_TEX_UNITS = 4;
+
+	int touchedUnits = 0;
 
 	for (int unit = 0; unit < BatchLayout::MAX_TEX_UNITS; unit++) {
-		if (b.texCoord[unit] == nullptr)
+		const bool used = (b.texCoord[unit] != nullptr);
+
+		if (!used && unit >= GUARDED_TEX_UNITS)
 			continue;
 
 		glClientActiveTexture(GL_TEXTURE0 + unit);
-		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-		glTexCoordPointer(4, GL_FLOAT, 0, b.texCoord[unit]);
-		lastTexUnit = unit;
+
+		if (used) {
+			glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+			glTexCoordPointer(4, GL_FLOAT, 0, b.texCoord[unit]);
+		} else {
+			glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		}
+
+		touchedUnits++;
 	}
 
 	glDrawArrays(b.mode, 0, b.count);
 
-	for (int unit = 0; unit <= lastTexUnit; unit++) {
+	for (int unit = 0; unit < BatchLayout::MAX_TEX_UNITS; unit++) {
 		if (b.texCoord[unit] == nullptr)
 			continue;
 
@@ -341,7 +371,7 @@ static void IssueBatch(const BatchLayout& b)
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 	}
 
-	if (lastTexUnit >= 0)
+	if (touchedUnits > 0)
 		glClientActiveTexture(GL_TEXTURE0);
 
 	if (b.edgeFlag != nullptr) glDisableClientState(GL_EDGE_FLAG_ARRAY);
