@@ -651,7 +651,17 @@ Verified on the resource bar: the four panel accents, all four icons and the res
 >
 > The figures below carry no Mesa commit, which is exactly the trap `kk_mipmap_leak.c`'s header warns about, and they were taken before the pin existed. The most likely reading is that pinning to `56588ef0665` fixed this and nobody went back to check. What is *not* established is whether it is absent at other resolutions or on a busier scene, since these five runs are one scene with one unit. Treat the section below as a description of a Mesa that is no longer being used.
 >
-> An outside contributor measured 11 GiB peak on KosmicKrisp against 7.3 GiB on MoltenVK, same engine and same demo, on a base five weeks older than our pin. That is a real driver difference and it is nothing like 5 GiB a second either.
+> An outside contributor measured 11 GiB peak on KosmicKrisp against 7.3 GiB on MoltenVK, same engine and same demo, on a base five weeks older than our pin, and 13.6 GiB with `c08dba83025` applied. All three ran five minutes to completion. Those are RSS rather than `phys_footprint`, so read them as a floor, but a Metal 4 run completing at all is hard to square with death at twelve seconds.
+>
+> **It is not the engine's immediate-mode volume either, tested 2026-08-26.** The obvious suspect was that buffering and compiled lists cut Lua drawing enough to hide the growth, so the old path was run on the current pin: `LuaImmediateModeBuffering = 0` and `LuaDisplayListMode = 0`, which is the engine as it stood when the figures below were recorded. 122 seconds, peak 7927 MiB, no death.
+>
+> | Configuration, current pin, Splinter Faction fixed start, 1400x850 | fps | peak footprint |
+> |---|---|---|
+> | buffering off, lists deferred | 16.7 | 7927 MiB |
+> | buffering on, lists deferred | 16.3 | 6062 MiB |
+> | buffering on, lists compiled, the default | 33.7 | 6440 MiB |
+>
+> Immediate mode costs about 1.5 GB of footprint, which is real and bounded, and nothing like a leak. So the difference between then and now is the Mesa, not the engine. The fps column is also the cleanest measure of what the batching branch bought: 2x, and almost all of it display lists rather than buffering.
 
 **There is a severe memory leak, around 5 GiB per second, and RSS cannot see it.**
 
