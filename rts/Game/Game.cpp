@@ -2096,9 +2096,9 @@ void CGame::DrawSkip(bool blackscreen) {
 	const float yn = 0.35f;
 	const float yp = 0.38f;
 	glColor3f(0.2f, 0.2f, 1.0f);
-	glRectf(0.25f - b, yn - b, 0.75f + b, yp + b);
+	glRectBatch(0.25f - b, yn - b, 0.75f + b, yp + b);
 	glColor3f(0.25f + (0.75f * ff), 1.0f - (0.75f * ff), 0.0f);
-	glRectf(0.5 - (0.25f * ff), yn, 0.5f + (0.25f * ff), yp);
+	glRectBatch(0.5 - (0.25f * ff), yn, 0.5f + (0.25f * ff), yp);
 	#endif
 }
 

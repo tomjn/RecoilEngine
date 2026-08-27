@@ -87,4 +87,6 @@ About 143 MB unpacked and 28 MB as a `.7z`. If yours is roughly double that, the
 
 The engine runs real games. Terrain, units, the menu and LuaUI all draw, mouse input lands where you click, and the window resizes.
 
-Known rough edges are all in `MACOS_RENDERER_PLAN.md`. The short version: performance is bounded by presenting through a readback rather than 1:1, `glPolygonMode(GL_LINE)` does nothing on this driver so wireframe stages are skipped, and immediate-mode batches need a flush between them because the driver merges batches it should not.
+Known rough edges are all in `MACOS_RENDERER_PLAN.md`. The short version: `glPolygonMode(GL_LINE)` does nothing on this driver so wireframe stages are skipped, and immediate-mode batches need a flush between them because the driver merges batches it should not.
+
+**The readback present path is not what bounds the frame rate.** This file said it was, for months, and the measurements say otherwise. Removing the readback and the present entirely is worth about 3% at full resolution and nothing measurable at render scale 0.5, tested interleaved twice. Copying a 2400x1600 frame costs 1.4 ms and presenting it 0.5 ms. The 6 ms that looks like readback is the GPU drawing the frame, which no present path avoids. See `MACOS_RENDERER_PLAN.md:1096` and `:1137`. The frame goes to LuaUI, 74% to 86% of it, and `MACOS_PERFORMANCE.md` is the file about that.

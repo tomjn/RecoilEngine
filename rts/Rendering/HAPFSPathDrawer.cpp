@@ -94,7 +94,7 @@ void HAPFSPathDrawer::DrawInMiniMap()
 	for (const int2& sb: ps->GetUpdatedBlocks()) {
 		const int blockIdxX = sb.x * ps->GetBlockSize();
 		const int blockIdxY = sb.y * ps->GetBlockSize();
-		glRectf(blockIdxX, blockIdxY, blockIdxX + ps->GetBlockSize(), blockIdxY + ps->GetBlockSize());
+		glRectBatch(blockIdxX, blockIdxY, blockIdxX + ps->GetBlockSize(), blockIdxY + ps->GetBlockSize());
 	}
 
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);

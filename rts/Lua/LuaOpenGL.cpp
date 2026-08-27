@@ -28,6 +28,7 @@
 #include "LuaFonts.h"
 #include "LuaHandle.h"
 #include "LuaHashString.h"
+#include "LuaImmediateBatch.h"
 #include "LuaIO.h"
 #include "LuaOpenGLUtils.h"
 #include "LuaRBOs.h"
@@ -84,6 +85,8 @@
 
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
+CONFIG(bool, LuaImmediateModeBuffering).defaultValue(true).description("Collect each gl.BeginEnd block and draw it with one glDrawArrays instead of one call a vertex. Set to false to restore the glBegin path.");
+CONFIG(int, LuaDisplayListMode).defaultValue(1).description("How gl.CreateList behaves where the driver mis-renders batches. 1 compiles into a real GL display list and replays it, which is the default. 0 defers instead, keeping the Lua function and running it live on every gl.CallList, which is much slower and is the way back if a driver needs it. 2 compiles the list and then throws the replay away, running the function live instead, which separates a fault caused by compiling from one caused by replaying. 2 is a diagnostic and is slower than either.");
 
 /*** Callouts for OpenGL API
  *
@@ -101,6 +104,15 @@ LuaOpenGL::DrawMode LuaOpenGL::prevDrawMode = LuaOpenGL::DRAW_NONE;
 bool  LuaOpenGL::safeMode = true;
 bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
+
+// Lua drawing is single threaded on the draw thread and every Lua state shares
+// one GL context, so one accumulator serves them all.
+static bool luaImmediateBuffering = true;
+static LuaImmediateBatch luaBatch;
+
+// 0 defer, 1 compile and replay, 2 compile and discard the replay. See the
+// CONFIG above and the comment in CreateList.
+static int luaDisplayListMode = 0;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -250,6 +262,160 @@ static CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 
 
 
+// Reads the value an attribute held when a block began, so vertices emitted
+// before the block set it can be back-filled. Only reached on that path, so the
+// glGetFloatv sync point stays off the hot path.
+static void FetchBatchDefault(BatchAttr attr, unsigned unit, float* out)
+{
+	switch (attr) {
+		case BatchAttr::Color:          glGetFloatv(GL_CURRENT_COLOR, out); break;
+		case BatchAttr::Normal:         glGetFloatv(GL_CURRENT_NORMAL, out); break;
+		case BatchAttr::SecondaryColor: glGetFloatv(GL_CURRENT_SECONDARY_COLOR, out); break;
+		case BatchAttr::FogCoord:       glGetFloatv(GL_CURRENT_FOG_COORD, out); break;
+
+		case BatchAttr::TexCoord: {
+			GLint prevUnit = GL_TEXTURE0;
+			glGetIntegerv(GL_ACTIVE_TEXTURE, &prevUnit);
+			glActiveTexture(GL_TEXTURE0 + unit);
+			glGetFloatv(GL_CURRENT_TEXTURE_COORDS, out);
+			glActiveTexture(prevUnit);
+		} break;
+
+		case BatchAttr::EdgeFlag: {
+			GLboolean flag = GL_TRUE;
+			glGetBooleanv(GL_EDGE_FLAG, &flag);
+			out[0] = (flag == GL_TRUE) ? 1.0f : 0.0f;
+		} break;
+	}
+}
+
+// Turns a finished block into one draw.
+//
+// Every pointer size is fixed and never varies between draws. Varying
+// glVertexPointer's size corrupts the frame on KosmicKrisp, measured at 30
+// frames of 30, while varying only the address is clean. That is legal GL the
+// driver gets wrong, so the constraint is worth stating rather than assuming.
+static void IssueBatch(const BatchLayout& b)
+{
+	if (b.count == 0)
+		return;
+
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(4, GL_FLOAT, 0, b.pos);
+
+	// Every array this draw does not use has to be turned off, not merely left
+	// alone. Client array enables are global state that other drawing leaves
+	// behind, and an array left on feeds this draw from a pointer that has
+	// nothing to do with it. A block that sets no colour then takes its colours
+	// from whatever array was last bound instead of from the current colour,
+	// which showed up as quads drawn in the previous colour rather than their own.
+	if (b.color != nullptr) {
+		glEnableClientState(GL_COLOR_ARRAY);
+		glColorPointer(4, GL_FLOAT, 0, b.color);
+	} else {
+		glDisableClientState(GL_COLOR_ARRAY);
+	}
+	if (b.normal != nullptr) {
+		glEnableClientState(GL_NORMAL_ARRAY);
+		glNormalPointer(GL_FLOAT, 0, b.normal);
+	} else {
+		glDisableClientState(GL_NORMAL_ARRAY);
+	}
+	if (b.secColor != nullptr) {
+		glEnableClientState(GL_SECONDARY_COLOR_ARRAY);
+		glSecondaryColorPointer(3, GL_FLOAT, 0, b.secColor);
+	} else {
+		glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+	}
+	if (b.fogCoord != nullptr) {
+		glEnableClientState(GL_FOG_COORD_ARRAY);
+		glFogCoordPointer(GL_FLOAT, 0, b.fogCoord);
+	} else {
+		glDisableClientState(GL_FOG_COORD_ARRAY);
+	}
+	if (b.edgeFlag != nullptr) {
+		glEnableClientState(GL_EDGE_FLAG_ARRAY);
+		glEdgeFlagPointer(0, b.edgeFlag);
+	} else {
+		glDisableClientState(GL_EDGE_FLAG_ARRAY);
+	}
+
+	// Texture coordinate arrays need clearing for the same reason, but only where
+	// something plausibly left one on. Fixed function drawing uses the low units,
+	// so guard those every time and leave the rest to the pair below. Sweeping all
+	// thirty two would be sixty four calls a batch for units nothing touches.
+	static constexpr int GUARDED_TEX_UNITS = 4;
+
+	int touchedUnits = 0;
+
+	for (int unit = 0; unit < BatchLayout::MAX_TEX_UNITS; unit++) {
+		const bool used = (b.texCoord[unit] != nullptr);
+
+		if (!used && unit >= GUARDED_TEX_UNITS)
+			continue;
+
+		glClientActiveTexture(GL_TEXTURE0 + unit);
+
+		if (used) {
+			glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+			glTexCoordPointer(4, GL_FLOAT, 0, b.texCoord[unit]);
+		} else {
+			glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		}
+
+		touchedUnits++;
+	}
+
+	glDrawArrays(b.mode, 0, b.count);
+
+	for (int unit = 0; unit < BatchLayout::MAX_TEX_UNITS; unit++) {
+		if (b.texCoord[unit] == nullptr)
+			continue;
+
+		glClientActiveTexture(GL_TEXTURE0 + unit);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	}
+
+	if (touchedUnits > 0)
+		glClientActiveTexture(GL_TEXTURE0);
+
+	if (b.edgeFlag != nullptr) glDisableClientState(GL_EDGE_FLAG_ARRAY);
+	if (b.fogCoord != nullptr) glDisableClientState(GL_FOG_COORD_ARRAY);
+	if (b.secColor != nullptr) glDisableClientState(GL_SECONDARY_COLOR_ARRAY);
+	if (b.normal   != nullptr) glDisableClientState(GL_NORMAL_ARRAY);
+	if (b.color    != nullptr) glDisableClientState(GL_COLOR_ARRAY);
+
+	glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+// The pair that replaces glBeginBatch and glEnd at the Lua block sites.
+static void LuaBatchBegin(GLenum mode)
+{
+	if (!luaImmediateBuffering)
+		return glBeginBatch(mode);
+
+	luaBatch.Begin(mode);
+}
+
+static void LuaBatchEnd()
+{
+	if (!luaImmediateBuffering)
+		return glEnd();
+
+	BatchLayout layout;
+
+	if (!luaBatch.End(layout))
+		return;
+
+	IssueBatch(layout);
+
+	// A colour set inside a block persists after it in real GL. One call at the
+	// end reproduces that without paying for one a vertex, and it has to happen
+	// even when the block drew nothing.
+	if (layout.colorSet)
+		glColor4fv(layout.finalColor);
+}
+
 static inline void glTexCoordNarrow(float x, float y, float z, float w, int arity)
 {
 	switch (arity) {
@@ -270,6 +436,9 @@ static inline void glTexCoordNarrow(float x, float y, float z, float w, int arit
 // coordinate, the same as widening a vertex.
 static inline void LuaTexCoordN(float x, float y, float z, float w, int arity)
 {
+	if (luaBatch.Active())
+		return luaBatch.TexCoord(0, x, y, z, w);
+
 	if (globalRendering->supportImmediateModeBatching)
 		return glTexCoordNarrow(x, y, z, w, arity);
 
@@ -292,6 +461,9 @@ static inline void glMultiTexCoordNarrow(GLenum unit, float x, float y, float z,
 // single float and an edge flag is a boolean, so none of those can vary.
 static inline void LuaMultiTexCoordN(GLenum unit, float x, float y, float z, float w, int arity)
 {
+	if (luaBatch.Active())
+		return luaBatch.TexCoord(unit - GL_TEXTURE0, x, y, z, w);
+
 	if (globalRendering->supportImmediateModeBatching)
 		return glMultiTexCoordNarrow(unit, x, y, z, w, arity);
 
@@ -312,6 +484,12 @@ static inline void glVertexNarrow(float x, float y, float z, float w, int arity)
 // interleaved, watching the load screen.
 static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 {
+	// Buffered, arity does not arise. The vertex goes into a four float slot and
+	// the whole block is drawn with one glVertexPointer of a size that never
+	// varies, which is what the widening below was standing in for.
+	if (luaBatch.Active())
+		return luaBatch.Vertex(x, y, z, w);
+
 	// Gated on the measured capability, the same way the flush is, so a driver
 	// that renders batches correctly pays nothing. Widening every vertex to four
 	// floats is cheap but it is on the hot path for all Lua drawing, and no other
@@ -322,6 +500,48 @@ static inline void LuaVertexN(float x, float y, float z, float w, int arity)
 	glVertex4f(x, y, z, w);
 }
 
+// The remaining per-vertex attributes. None of them can vary its arity, so these
+// exist only to route the value into the accumulator when a block is open.
+static inline void LuaColor4fv(const float* rgba)
+{
+	if (luaBatch.Active())
+		return luaBatch.Color(rgba);
+
+	glColor4fv(rgba);
+}
+
+static inline void LuaNormal3f(float x, float y, float z)
+{
+	if (luaBatch.Active())
+		return luaBatch.Normal(x, y, z);
+
+	glNormal3f(x, y, z);
+}
+
+static inline void LuaSecondaryColor3f(float r, float g, float b)
+{
+	if (luaBatch.Active())
+		return luaBatch.SecondaryColor(r, g, b);
+
+	glSecondaryColor3f(r, g, b);
+}
+
+static inline void LuaFogCoordf(float f)
+{
+	if (luaBatch.Active())
+		return luaBatch.FogCoord(f);
+
+	glFogCoordf(f);
+}
+
+static inline void LuaEdgeFlag(bool e)
+{
+	if (luaBatch.Active())
+		return luaBatch.EdgeFlag(e);
+
+	glEdgeFlag(e);
+}
+
 /******************************************************************************/
 /******************************************************************************/
 
@@ -330,6 +550,10 @@ void LuaOpenGL::Init()
 	glEnable(GL_VERTEX_PROGRAM_POINT_SIZE);
 
 	canUseShaders = configHandler->GetBool("LuaShaders");
+
+	luaImmediateBuffering = configHandler->GetBool("LuaImmediateModeBuffering");
+	luaDisplayListMode = configHandler->GetInt("LuaDisplayListMode");
+	luaBatch.SetDefaultFetch(FetchBatchDefault);
 
 	deprecatedGLWarnLevel = configHandler->GetInt("DeprecatedGLWarnLevel");
 	if (deprecatedGLWarnLevel == 1)
@@ -1181,6 +1405,18 @@ inline void LuaOpenGL::CheckDrawingEnabled(lua_State* L, const char* caller)
 	}
 }
 
+// The GL specification allows only per-vertex attribute calls between glBegin
+// and glEnd, and rejects the rest with GL_INVALID_OPERATION. A widget calling
+// gl.Texture between two gl.Vertex calls therefore changes nothing today.
+//
+// Buffering a block would turn that into a change applying to the whole
+// primitive, so callers ask this and do nothing when it is true. The point is to
+// keep what widgets see, not to improve on it.
+inline bool LuaOpenGL::InsideBatch()
+{
+	return luaBatch.Active();
+}
+
 inline void LuaOpenGL::CondWarnDeprecatedGL(lua_State* L, const char* caller)
 {
 	if (deprecatedGLWarnLevel <= 0)
@@ -1372,6 +1608,7 @@ int LuaOpenGL::ConfigMiniMap(lua_State* L)
 int LuaOpenGL::DrawMiniMap(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	if (minimap == nullptr)
 		return 0;
@@ -1423,6 +1660,7 @@ int LuaOpenGL::DrawMiniMap(lua_State* L)
 int LuaOpenGL::BeginText(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	auto userDefinedBlending = luaL_optboolean(L, 2, false);
 	font->Begin(userDefinedBlending);
 	return 0;
@@ -1435,6 +1673,7 @@ int LuaOpenGL::BeginText(lua_State* L)
 int LuaOpenGL::EndText(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	font->End();
 	return 0;
 }
@@ -1468,6 +1707,7 @@ int LuaOpenGL::EndText(lua_State* L)
 int LuaOpenGL::Text(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 
@@ -1690,6 +1930,7 @@ static void GLObjectShapeTextures(lua_State* L, const SolidObjectDef* def)
 int LuaOpenGL::UnitCommon(lua_State* L, bool applyTransform, bool callDrawUnit)
 {
 	LuaOpenGL::CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	CUnit* unit = ParseUnit(L, __func__, 1);
 
@@ -1771,6 +2012,7 @@ int LuaOpenGL::UnitRaw(lua_State* L) { return (UnitCommon(L, false, false)); }
 int LuaOpenGL::UnitTextures(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectTextures(L, unitHandler.GetUnit(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1786,6 +2028,7 @@ int LuaOpenGL::UnitTextures(lua_State* L)
 int LuaOpenGL::UnitShape(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectShape(L, unitDefHandler->GetUnitDefByID(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1798,6 +2041,7 @@ int LuaOpenGL::UnitShape(lua_State* L)
 int LuaOpenGL::UnitShapeTextures(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectShapeTextures(L, unitDefHandler->GetUnitDefByID(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1810,6 +2054,7 @@ int LuaOpenGL::UnitShapeTextures(lua_State* L)
 int LuaOpenGL::UnitMultMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const CUnit* unit = ParseUnit(L, __func__, 1);
@@ -1847,6 +2092,7 @@ int LuaOpenGL::UnitPieceMatrix(lua_State* L) {return (UnitPieceMultMatrix(L)); }
 int LuaOpenGL::UnitPieceMultMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	GLObjectPieceMultMatrix(L, ParseUnit(L, __func__, 1));
 	return 0;
@@ -1858,6 +2104,7 @@ int LuaOpenGL::UnitPieceMultMatrix(lua_State* L)
 int LuaOpenGL::FeatureCommon(lua_State* L, bool applyTransform, bool callDrawFeature)
 {
 	LuaOpenGL::CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	CFeature* feature = ParseFeature(L, __func__, 1);
 
@@ -1937,6 +2184,7 @@ int LuaOpenGL::FeatureRaw(lua_State* L) { return (FeatureCommon(L, false, false)
 int LuaOpenGL::FeatureTextures(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectTextures(L, featureHandler.GetFeature(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1952,6 +2200,7 @@ int LuaOpenGL::FeatureTextures(lua_State* L)
 int LuaOpenGL::FeatureShape(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectShape(L, featureDefHandler->GetFeatureDefByID(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1964,6 +2213,7 @@ int LuaOpenGL::FeatureShape(lua_State* L)
 int LuaOpenGL::FeatureShapeTextures(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	GLObjectShapeTextures(L, featureDefHandler->GetFeatureDefByID(luaL_checkint(L, 1)));
 	return 0;
 }
@@ -1976,6 +2226,7 @@ int LuaOpenGL::FeatureShapeTextures(lua_State* L)
 int LuaOpenGL::FeatureMultMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const CFeature* feature = ParseFeature(L, __func__, 1);
@@ -2015,6 +2266,7 @@ int LuaOpenGL::FeaturePieceMatrix(lua_State* L) { return (FeaturePieceMultMatrix
 int LuaOpenGL::FeaturePieceMultMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	GLObjectPieceMultMatrix(L, ParseFeature(L, __func__, 1));
 	return 0;
@@ -2040,6 +2292,7 @@ int LuaOpenGL::FeaturePieceMultMatrix(lua_State* L)
 int LuaOpenGL::DrawListAtUnit(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	// is visible to current read team, is not an icon
@@ -2091,6 +2344,7 @@ int LuaOpenGL::DrawListAtUnit(lua_State* L)
 int LuaOpenGL::DrawFuncAtUnit(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	// is visible to current read team, is not an icon
 	const CUnit* unit = ParseDrawUnit(L, __func__, 1);
@@ -2146,6 +2400,7 @@ int LuaOpenGL::DrawFuncAtUnit(lua_State* L)
 int LuaOpenGL::DrawGroundCircle(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
@@ -2208,6 +2463,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 {
 	// FIXME: incomplete (esp. texcoord clamping)
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const float x0 = luaL_checknumber(L, 1);
 	const float z0 = luaL_checknumber(L, 2);
 	const float x1 = luaL_checknumber(L, 3);
@@ -2261,7 +2517,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const int xit = xib + 1;
 			const float xb = xib * SQUARE_SIZE;
 			const float xt = xb + SQUARE_SIZE;
-			glBeginBatch(GL_TRIANGLE_STRIP);
+			LuaBatchBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -2270,7 +2526,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				LuaVertexN(xt, yt, z, 1.0f, 3);
 				LuaVertexN(xb, yb, z, 1.0f, 3);
 			}
-			glEnd();
+			LuaBatchEnd();
 		}
 	} else {
 		const float tuStep = (tu1 - tu0) / float(xie - xis);
@@ -2284,7 +2540,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const float xt = xb + SQUARE_SIZE;
 			const float tut = tub + tuStep;
 			float tv = tv0;
-			glBeginBatch(GL_TRIANGLE_STRIP);
+			LuaBatchBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -2296,7 +2552,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 				LuaVertexN(xb, yb, z, 1.0f, 3);
 				tv += tvStep;
 			}
-			glEnd();
+			LuaBatchEnd();
 			tub += tuStep;
 		}
 	}
@@ -2409,7 +2665,7 @@ int LuaOpenGL::Shape(lua_State* L)
 
 	const GLuint type = (GLuint)luaL_checkint(L, 1);
 
-	glBeginBatch(type);
+	LuaBatchBegin(type);
 
 	const int table = 2;
 	int i = 1;
@@ -2421,9 +2677,9 @@ int LuaOpenGL::Shape(lua_State* L)
 			luaL_error(L, "Shape: bad vertex data");
 			break;
 		}
-		if (vd.hasColor) { glColor4fv(vd.color);   }
+		if (vd.hasColor) { LuaColor4fv(vd.color);   }
 		if (vd.hasTxcd)  { LuaTexCoordN(vd.txcd[0], vd.txcd[1], 0.0f, 1.0f, 2); }
-		if (vd.hasNorm)  { glNormal3fv(vd.norm); }
+		if (vd.hasNorm)  { LuaNormal3f(vd.norm[0], vd.norm[1], vd.norm[2]); }
 		if (vd.hasVert)  { LuaVertexN(vd.vert[0], vd.vert[1], vd.vert[2], 1.0f, 3); } // always last
 	}
 	if (!lua_isnil(L, -1)) {
@@ -2431,7 +2687,7 @@ int LuaOpenGL::Shape(lua_State* L)
 	}
 	// lua_pop(L, 1);
 
-	glEnd();
+	LuaBatchEnd();
 
 	return 0;
 }
@@ -2461,9 +2717,9 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	}
 
 	// call the function
-	glBeginBatch(primMode);
+	LuaBatchBegin(primMode);
 	const int error = lua_pcall(L, (args - 2), 0, 0);
-	glEnd();
+	LuaBatchEnd();
 
 	if (error != 0) {
 		LOG_L(L_ERROR, "gl.BeginEnd: error(%i) = %s",
@@ -2594,14 +2850,14 @@ int LuaOpenGL::Normal(lua_State* L)
 			luaL_error(L, "Bad data passed to gl.Normal()");
 		}
 		const float z = lua_tofloat(L, -1);
-		glNormal3f(x, y, z);
+		LuaNormal3f(x, y, z);
 		return 0;
 	}
 
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
-	glNormal3f(x, y, z);
+	LuaNormal3f(x, y, z);
 	return 0;
 }
 
@@ -2835,14 +3091,14 @@ int LuaOpenGL::SecondaryColor(lua_State* L)
 			luaL_error(L, "Bad data passed to gl.SecondaryColor()");
 		}
 		const float z = lua_tofloat(L, -1);
-		glSecondaryColor3f(x, y, z);
+		LuaSecondaryColor3f(x, y, z);
 		return 0;
 	}
 
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
-	glSecondaryColor3f(x, y, z);
+	LuaSecondaryColor3f(x, y, z);
 	return 0;
 }
 
@@ -2857,7 +3113,7 @@ int LuaOpenGL::FogCoord(lua_State* L)
 	CondWarnDeprecatedGL(L, __func__);
 
 	const float value = luaL_checkfloat(L, 1);
-	glFogCoordf(value);
+	LuaFogCoordf(value);
 	return 0;
 }
 
@@ -2872,7 +3128,7 @@ int LuaOpenGL::EdgeFlag(lua_State* L)
 	CondWarnDeprecatedGL(L, __func__);
 
 	if (lua_isboolean(L, 1)) {
-		glEdgeFlag(lua_toboolean(L, 1));
+		LuaEdgeFlag(lua_toboolean(L, 1) != 0);
 	}
 	return 0;
 }
@@ -2890,10 +3146,35 @@ int LuaOpenGL::EdgeFlag(lua_State* L)
 int LuaOpenGL::Rect(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const float x1 = luaL_checkfloat(L, 1);
 	const float y1 = luaL_checkfloat(L, 2);
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
+
+	// Buffered like everything else rather than left as glRectf.
+	//
+	// glRectf is an immediate-mode primitive that never went through glBeginBatch,
+	// so it never got the flush that separates batches on a driver which merges
+	// them. That went unnoticed while everything after it was also immediate mode,
+	// and therefore also flushed. Once Lua drawing is buffered, a glDrawArrays
+	// follows it unseparated, and the driver loses the draws that follow.
+	//
+	// Measured with batch_merge_probe.c: glRectf followed by unflushed glDrawArrays
+	// is dirty in 30 frames of 30, and clean in 30 of 30 with a flush between.
+	// Emitting the quad through the accumulator removes the mixture instead of
+	// paying for another flush. The vertex order is the one glRect is defined to
+	// produce.
+	if (luaImmediateBuffering) {
+		LuaBatchBegin(GL_QUADS);
+		LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
+		LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
+		LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
+		LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
+		LuaBatchEnd();
+		return 0;
+	}
+
 	glRectf(x1, y1, x2, y2);
 	return 0;
 }
@@ -2923,6 +3204,7 @@ int LuaOpenGL::Rect(lua_State* L)
 int LuaOpenGL::TexRect(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 
@@ -2949,13 +3231,13 @@ int LuaOpenGL::TexRect(lua_State* L)
 			t1 = 0.0f;
 			t2 = 1.0f;
 		}
-		glBeginBatch(GL_QUADS); {
+		LuaBatchBegin(GL_QUADS); {
 			LuaTexCoordN(s1, t1, 0.0f, 1.0f, 2); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s2, t1, 0.0f, 1.0f, 2); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s2, t2, 0.0f, 1.0f, 2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
 			LuaTexCoordN(s1, t2, 0.0f, 1.0f, 2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 		}
-		glEnd();
+		LuaBatchEnd();
 		return 0;
 	}
 
@@ -2963,13 +3245,13 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const float t1 = luaL_checkfloat(L, 6);
 	const float s2 = luaL_checkfloat(L, 7);
 	const float t2 = luaL_checkfloat(L, 8);
-	glBeginBatch(GL_QUADS); {
+	LuaBatchBegin(GL_QUADS); {
 		LuaTexCoordN(s1, t1, 0.0f, 1.0f, 2); LuaVertexN(x1, y1, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s2, t1, 0.0f, 1.0f, 2); LuaVertexN(x2, y1, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s2, t2, 0.0f, 1.0f, 2); LuaVertexN(x2, y2, 0.0f, 1.0f, 2);
 		LuaTexCoordN(s1, t2, 0.0f, 1.0f, 2); LuaVertexN(x1, y2, 0.0f, 1.0f, 2);
 	}
-	glEnd();
+	LuaBatchEnd();
 
 	return 0;
 }
@@ -3081,7 +3363,7 @@ int LuaOpenGL::Color(lua_State* L)
 		luaL_error(L, "Incorrect arguments to gl.Color()");
 	}
 
-	glColor4fv(color.data());
+	LuaColor4fv(color.data());
 
 	return 0;
 }
@@ -3104,6 +3386,7 @@ int LuaOpenGL::Color(lua_State* L)
 int LuaOpenGL::Material(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -3176,6 +3459,7 @@ int LuaOpenGL::Material(lua_State* L)
 int LuaOpenGL::ResetState(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	ResetGLState();
 	return 0;
 }
@@ -3187,6 +3471,7 @@ int LuaOpenGL::ResetState(lua_State* L)
 int LuaOpenGL::ResetMatrices(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args != 0) {
@@ -3206,6 +3491,7 @@ int LuaOpenGL::ResetMatrices(lua_State* L)
 int LuaOpenGL::Lighting(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	if (luaL_checkboolean(L, 1)) {
 		glEnable(GL_LIGHTING);
@@ -3223,6 +3509,7 @@ int LuaOpenGL::Lighting(lua_State* L)
 int LuaOpenGL::ShadeModel(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	glShadeModel((GLenum)luaL_checkint(L, 1));
 	return 0;
@@ -3242,6 +3529,7 @@ int LuaOpenGL::ShadeModel(lua_State* L)
 int LuaOpenGL::Scissor(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args == 1) {
@@ -3279,6 +3567,7 @@ int LuaOpenGL::Scissor(lua_State* L)
 int LuaOpenGL::Viewport(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int x = luaL_checkint(L, 1);
 	const int y = luaL_checkint(L, 2);
@@ -3308,6 +3597,7 @@ int LuaOpenGL::Viewport(lua_State* L)
 int LuaOpenGL::ColorMask(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args == 1) {
@@ -3336,6 +3626,7 @@ int LuaOpenGL::ColorMask(lua_State* L)
 int LuaOpenGL::DepthMask(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	if (luaL_checkboolean(L, 1)) {
 		glDepthMask(GL_TRUE);
 	} else {
@@ -3363,6 +3654,7 @@ int LuaOpenGL::DepthMask(lua_State* L)
 int LuaOpenGL::DepthTest(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args != 1) {
@@ -3394,6 +3686,7 @@ int LuaOpenGL::DepthTest(lua_State* L)
 int LuaOpenGL::DepthClamp(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	luaL_checktype(L, 1, LUA_TBOOLEAN);
 	if (lua_toboolean(L, 1)) {
 		glEnable(GL_DEPTH_CLAMP);
@@ -3421,6 +3714,7 @@ int LuaOpenGL::DepthClamp(lua_State* L)
 int LuaOpenGL::Culling(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args != 1) {
@@ -3465,6 +3759,7 @@ int LuaOpenGL::Culling(lua_State* L)
 int LuaOpenGL::LogicOp(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args != 1) {
@@ -3496,6 +3791,7 @@ int LuaOpenGL::LogicOp(lua_State* L)
 int LuaOpenGL::Fog(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	if (luaL_checkboolean(L, 1)) {
@@ -3523,6 +3819,7 @@ int LuaOpenGL::Fog(lua_State* L)
 int LuaOpenGL::Blending(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args == 1) {
@@ -3589,6 +3886,7 @@ int LuaOpenGL::Blending(lua_State* L)
 int LuaOpenGL::BlendEquation(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum mode = (GLenum)luaL_checkint(L, 1);
 	glBlendEquation(mode);
 	return 0;
@@ -3603,6 +3901,7 @@ int LuaOpenGL::BlendEquation(lua_State* L)
 int LuaOpenGL::BlendFunc(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum src = (GLenum)luaL_checkint(L, 1);
 	const GLenum dst = (GLenum)luaL_checkint(L, 2);
 	glBlendFunc(src, dst);
@@ -3618,6 +3917,7 @@ int LuaOpenGL::BlendFunc(lua_State* L)
 int LuaOpenGL::BlendEquationSeparate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum modeRGB   = (GLenum)luaL_checkint(L, 1);
 	const GLenum modeAlpha = (GLenum)luaL_checkint(L, 2);
 	glBlendEquationSeparate(modeRGB, modeAlpha);
@@ -3635,6 +3935,7 @@ int LuaOpenGL::BlendEquationSeparate(lua_State* L)
 int LuaOpenGL::BlendFuncSeparate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum srcRGB   = (GLenum)luaL_checkint(L, 1);
 	const GLenum dstRGB   = (GLenum)luaL_checkint(L, 2);
 	const GLenum srcAlpha = (GLenum)luaL_checkint(L, 3);
@@ -3665,6 +3966,7 @@ int LuaOpenGL::BlendFuncSeparate(lua_State* L)
 int LuaOpenGL::AlphaTest(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -3696,6 +3998,7 @@ int LuaOpenGL::AlphaToCoverage(lua_State* L)
 		return 0;
 
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	if (luaL_checkboolean(L, 1)) {
 		glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE_ARB);
 	}
@@ -3726,6 +4029,7 @@ int LuaOpenGL::AlphaToCoverage(lua_State* L)
 int LuaOpenGL::PolygonMode(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum face = (GLenum)luaL_checkint(L, 1);
 	const GLenum mode = (GLenum)luaL_checkint(L, 2);
 	glPolygonMode(face, mode);
@@ -3752,6 +4056,7 @@ int LuaOpenGL::PolygonMode(lua_State* L)
 int LuaOpenGL::PolygonOffset(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if (args == 1) {
@@ -3787,6 +4092,7 @@ int LuaOpenGL::PolygonOffset(lua_State* L)
 int LuaOpenGL::StencilTest(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	luaL_checktype(L, 1, LUA_TBOOLEAN);
 	if (lua_toboolean(L, 1)) {
 		glEnable(GL_STENCIL_TEST);
@@ -3805,6 +4111,7 @@ int LuaOpenGL::StencilTest(lua_State* L)
 int LuaOpenGL::StencilMask(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLuint mask = luaL_checkint(L, 1);
 	glStencilMask(mask);
 	return 0;
@@ -3821,6 +4128,7 @@ int LuaOpenGL::StencilMask(lua_State* L)
 int LuaOpenGL::StencilFunc(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum func = luaL_checkint(L, 1);
 	const GLint  ref  = luaL_checkint(L, 2);
 	const GLuint mask = luaL_checkint(L, 3);
@@ -3839,6 +4147,7 @@ int LuaOpenGL::StencilFunc(lua_State* L)
 int LuaOpenGL::StencilOp(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum fail  = luaL_checkint(L, 1);
 	const GLenum zfail = luaL_checkint(L, 2);
 	const GLenum zpass = luaL_checkint(L, 3);
@@ -3856,6 +4165,7 @@ int LuaOpenGL::StencilOp(lua_State* L)
 int LuaOpenGL::StencilMaskSeparate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum face = luaL_checkint(L, 1);
 	const GLuint mask = luaL_checkint(L, 2);
 	glStencilMaskSeparate(face, mask);
@@ -3874,6 +4184,7 @@ int LuaOpenGL::StencilMaskSeparate(lua_State* L)
 int LuaOpenGL::StencilFuncSeparate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum face = luaL_checkint(L, 1);
 	const GLenum func = luaL_checkint(L, 2);
 	const GLint  ref  = luaL_checkint(L, 3);
@@ -3894,6 +4205,7 @@ int LuaOpenGL::StencilFuncSeparate(lua_State* L)
 int LuaOpenGL::StencilOpSeparate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum face  = luaL_checkint(L, 1);
 	const GLenum fail  = luaL_checkint(L, 2);
 	const GLenum zfail = luaL_checkint(L, 3);
@@ -3922,6 +4234,7 @@ int LuaOpenGL::StencilOpSeparate(lua_State* L)
 int LuaOpenGL::LineStipple(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -4104,6 +4417,14 @@ int LuaOpenGL::Texture(lua_State* L)
 	//
 
 	CheckDrawingEnabled(L, __func__);
+
+	// Binding a texture part way through a primitive is not something GL will do,
+	// so report the failure rather than returning nothing. A widget checking the
+	// result keeps getting one value back, and now it is the truthful one.
+	if (InsideBatch()) {
+		lua_pushboolean(L, false);
+		return 1;
+	}
 
 	if (lua_gettop(L) < 1)
 		luaL_error(L, "Incorrect [number of] arguments to gl.Texture()");
@@ -4418,6 +4739,7 @@ int LuaOpenGL::TextureInfo(lua_State* L)
 int LuaOpenGL::CopyToTexture(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const std::string& texture = luaL_checkstring(L, 1);
 
@@ -4460,6 +4782,7 @@ int LuaOpenGL::CopyToTexture(lua_State* L)
 int LuaOpenGL::RenderToTexture(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const std::string& texture = luaL_checkstring(L, 1);
 
@@ -4539,6 +4862,7 @@ int LuaOpenGL::GenerateMipmap(lua_State* L)
 int LuaOpenGL::ActiveTexture(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 	if ((args < 2) || !lua_isnumber(L, 1) || !lua_isfunction(L, 2)) {
@@ -4582,6 +4906,7 @@ int LuaOpenGL::ActiveTexture(lua_State* L)
 int LuaOpenGL::TexEnv(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const GLenum target = (GLenum)luaL_checknumber(L, 1);
@@ -4628,6 +4953,7 @@ int LuaOpenGL::TexEnv(lua_State* L)
 int LuaOpenGL::MultiTexEnv(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int texNum    =    luaL_checkint(L, 1);
@@ -4698,6 +5024,7 @@ static void SetTexGenState(GLenum target, bool state)
 int LuaOpenGL::TexGen(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const GLenum target = (GLenum)luaL_checknumber(L, 1);
@@ -4759,6 +5086,7 @@ int LuaOpenGL::TexGen(lua_State* L)
 int LuaOpenGL::MultiTexGen(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int texNum = luaL_checkint(L, 1);
@@ -4834,6 +5162,7 @@ int LuaOpenGL::MultiTexGen(lua_State* L)
 int LuaOpenGL::BindImageTexture(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	int argNum = 1;
 	//unit
@@ -5168,6 +5497,7 @@ int LuaOpenGL::GetEngineAtlasTextures(lua_State* L) {
 int LuaOpenGL::Clear(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int args = lua_gettop(L); // number of arguments
 
@@ -5209,6 +5539,7 @@ int LuaOpenGL::Clear(lua_State* L)
 int LuaOpenGL::SwapBuffers(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	// only meant for frame-limited LuaMenu's that want identical content in both buffers
 	if (!CLuaHandle::GetHandle(L)->PersistOnReload())
@@ -5229,6 +5560,7 @@ int LuaOpenGL::SwapBuffers(lua_State* L)
 int LuaOpenGL::Translate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
@@ -5247,6 +5579,7 @@ int LuaOpenGL::Translate(lua_State* L)
 int LuaOpenGL::Scale(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
@@ -5266,6 +5599,7 @@ int LuaOpenGL::Scale(lua_State* L)
 int LuaOpenGL::Rotate(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const float r = luaL_checkfloat(L, 1);
 	const float x = luaL_checkfloat(L, 2);
@@ -5288,6 +5622,7 @@ int LuaOpenGL::Rotate(lua_State* L)
 int LuaOpenGL::Ortho(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const float left   = luaL_checknumber(L, 1);
 	const float right  = luaL_checknumber(L, 2);
@@ -5312,6 +5647,7 @@ int LuaOpenGL::Ortho(lua_State* L)
 int LuaOpenGL::Frustum(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const float left   = luaL_checknumber(L, 1);
 	const float right  = luaL_checknumber(L, 2);
@@ -5330,6 +5666,7 @@ int LuaOpenGL::Frustum(lua_State* L)
 int LuaOpenGL::Billboard(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	glMultMatrixf(camera->GetBillBoardMatrix());
 	return 0;
@@ -5361,6 +5698,7 @@ int LuaOpenGL::Billboard(lua_State* L)
 int LuaOpenGL::Light(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const GLenum light = GL_LIGHT0 + (GLint)luaL_checknumber(L, 1);
@@ -5424,6 +5762,7 @@ int LuaOpenGL::Light(lua_State* L)
 int LuaOpenGL::ClipPlane(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int plane = luaL_checkint(L, 1);
@@ -5457,6 +5796,7 @@ int LuaOpenGL::ClipPlane(lua_State* L)
  */
 int LuaOpenGL::ClipDistance(lua_State* L) {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 
 	const int clipId = luaL_checkint(L, 1);
 
@@ -5490,6 +5830,7 @@ int LuaOpenGL::ClipDistance(lua_State* L) {
 int LuaOpenGL::MatrixMode(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	GLenum mode = (GLenum)luaL_checkint(L, 1);
 	if (!GetLuaContextData(L)->glMatrixTracker.SetMatrixMode(mode))
@@ -5505,6 +5846,7 @@ int LuaOpenGL::MatrixMode(lua_State* L)
 int LuaOpenGL::LoadIdentity(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -5567,6 +5909,7 @@ int LuaOpenGL::LoadIdentity(lua_State* L)
 int LuaOpenGL::LoadMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int luaType = lua_type(L, 1);
@@ -5626,6 +5969,7 @@ int LuaOpenGL::LoadMatrix(lua_State* L)
 int LuaOpenGL::MultMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int luaType = lua_type(L, 1);
@@ -5661,6 +6005,7 @@ int LuaOpenGL::MultMatrix(lua_State* L)
 int LuaOpenGL::PushMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -5682,6 +6027,7 @@ int LuaOpenGL::PushMatrix(lua_State* L)
 int LuaOpenGL::PopMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
@@ -5710,6 +6056,7 @@ int LuaOpenGL::PopMatrix(lua_State* L)
 int LuaOpenGL::PushPopMatrix(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 
 	std::vector<GLenum> matModes;
@@ -5846,6 +6193,7 @@ int LuaOpenGL::GetMatrixData(lua_State* L)
 int LuaOpenGL::PushAttrib(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	int mask = luaL_optnumber(L, 1, static_cast<lua_Number>(GL_ALL_ATTRIB_BITS));
 	if (mask < 0) {
 		mask = -mask;
@@ -5862,6 +6210,7 @@ int LuaOpenGL::PushAttrib(lua_State* L)
 int LuaOpenGL::PopAttrib(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	glPopAttrib();
 	return 0;
 }
@@ -5883,6 +6232,7 @@ int LuaOpenGL::PopAttrib(lua_State* L)
 int LuaOpenGL::UnsafeState(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	const GLenum state = (GLenum)luaL_checkint(L, 1);
 	int funcLoc = 2;
 	bool reverse = false;
@@ -5915,6 +6265,9 @@ int LuaOpenGL::UnsafeState(lua_State* L)
  */
 int LuaOpenGL::GetFixedState(lua_State* L)
 {
+	// Not guarded against being inside a block. It only reads state, so it cannot
+	// cause the problem the guard exists for, and returning nothing would change
+	// how many values a widget gets back.
 	CheckDrawingEnabled(L, __func__);
 	const char* param = luaL_checkstring(L, 1);
 	const bool toStr = luaL_optboolean(L, 2, false);
@@ -6209,12 +6562,35 @@ int LuaOpenGL::CreateList(lua_State* L)
 			"Incorrect arguments to gl.CreateList(func [, arg1, arg2, etc ...])");
 	}
 
-	// Where the driver mis-renders immediate-mode batches, do not compile at
-	// all. glFlush is executed during compilation and is never recorded into
-	// the list, so glBeginBatch cannot help a batch that is baked into one, and
-	// neither can any flush at replay time. Keep the function instead and run it
-	// live on every gl.CallList, which is the path the mitigation does reach.
-	if (!globalRendering->supportImmediateModeBatching) {
+	// Lists used to be deferred here rather than compiled, because compiling
+	// them produced a screen-filling wedge of stretched UI geometry. The cause
+	// was never the compilation. It was the replay: a list holding a textured
+	// glDrawArrays corrupts the frame when live client array draws are
+	// interleaved with the replays, which is every frame, because some widgets
+	// replay lists while others draw live. CallList now flushes either side of
+	// glCallList and the wedge is gone, confirmed by a human driving the game.
+	//
+	// The deferral survives as mode 0 because it is the only way back if a
+	// driver turns out to need it, and mode 2 exists to tell compiling and
+	// replaying apart the next time something like this appears.
+	//
+	//   0  defer. Never compile, run the function live on every gl.CallList
+	//   1  compile and replay with glCallList. The default
+	//   2  compile, then run the function live anyway and never replay
+	//
+	// Mode 2 is the diagnostic. Compilation and everything it does to GL state
+	// still happens, on the same schedule, but nothing the list recorded is ever
+	// drawn. An artefact that survives mode 2 was caused by compiling. One that
+	// only appears in mode 1 was caused by replaying. Mode 2 is slower than
+	// either and is not a configuration to ship.
+	const bool deferList = !globalRendering->supportImmediateModeBatching && luaDisplayListMode == 0;
+	const bool keepFunc  = !globalRendering->supportImmediateModeBatching && luaDisplayListMode == 2;
+
+	// Non-zero only in mode 2, where the compiled list also carries the function
+	// that built it and CallList runs that instead of replaying.
+	int keptFuncRef = 0;
+
+	if (deferList || keepFunc) {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 
 		// A deferred list holds a Lua closure and its upvalues, not a GL name.
@@ -6242,16 +6618,24 @@ int LuaOpenGL::CreateList(lua_State* L)
 			lua_rawseti(L, -2, i);
 		}
 
-		const int funcRef = luaL_ref(L, LUA_REGISTRYINDEX);
-		const unsigned int index = displayLists.NewDeferredDList(funcRef);
+		// Copies the function and its arguments rather than consuming them, so
+		// mode 2 can hold the reference and still compile from the same stack.
+		keptFuncRef = luaL_ref(L, LUA_REGISTRYINDEX);
 
-		lua_pushnumber(L, index);
-		return 1;
+		if (deferList) {
+			const unsigned int index = displayLists.NewDeferredDList(keptFuncRef);
+
+			lua_pushnumber(L, index);
+			return 1;
+		}
 	}
 
 	// generate the list id
 	const GLuint list = glGenLists(1);
 	if (list == 0) {
+		if (keptFuncRef != 0)
+			luaL_unref(L, LUA_REGISTRYINDEX, keptFuncRef);
+
 		lua_pushnumber(L, 0);
 		return 1;
 	}
@@ -6270,6 +6654,10 @@ int LuaOpenGL::CreateList(lua_State* L)
 
 	if (error != 0) {
 		glDeleteLists(list, 1);
+
+		if (keptFuncRef != 0)
+			luaL_unref(L, LUA_REGISTRYINDEX, keptFuncRef);
+
 		LOG_L(L_ERROR, "gl.CreateList: error(%i) = %s",
 				error, lua_tostring(L, -1));
 		lua_pushnumber(L, 0);
@@ -6277,6 +6665,12 @@ int LuaOpenGL::CreateList(lua_State* L)
 	else {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 		const unsigned int index = displayLists.NewDList(list, matData);
+
+		// CallList checks the function reference first, so attaching one here is
+		// what makes mode 2 compile the list and then never replay it.
+		if (keptFuncRef != 0)
+			displayLists.SetFuncRef(index, keptFuncRef);
+
 		lua_pushnumber(L, index);
 	}
 
@@ -6294,6 +6688,7 @@ int LuaOpenGL::CreateList(lua_State* L)
 int LuaOpenGL::CallList(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	CondWarnDeprecatedGL(L, __func__);
 	const unsigned int listIndex = luaL_checkint(L, 1);
 	CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
@@ -6331,7 +6726,30 @@ int LuaOpenGL::CallList(lua_State* L)
 		SMatrixStateData matrixStateData = displayLists.GetMatrixState(listIndex);
 		int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
 		if (error == 0) {
+			// Separate the replay from the drawing either side of it.
+			//
+			// Replaying a list that contains a textured glDrawArrays corrupts
+			// the frame on KosmicKrisp when live client array draws are
+			// interleaved with the replays. Measured with batch_merge_probe.c:
+			// every batch from a list is clean 0 of 20, all live drawing is
+			// clean, and the two mixed is dirty 20 of 20 at about 657,000 wrong
+			// pixels a frame on a 1,152,000 pixel surface. Untextured mixing is
+			// clean, so the texture coordinate array is required.
+			//
+			// A flush either side of the replay is clean 0 of 20. Rebinding the
+			// array pointers before each draw does nothing, 20 of 20 dirty, so
+			// this is a synchronisation fault and not stale client array state.
+			//
+			// Far cheaper than the per-batch flush in glBeginBatch. A frame has
+			// thousands of batches and tens of list replays.
+			if (!globalRendering->supportImmediateModeBatching)
+				glFlush();
+
 			glCallList(dlist);
+
+			if (!globalRendering->supportImmediateModeBatching)
+				glFlush();
+
 			return 0;
 		}
 		luaL_error(L, "Matrix stack %sflow in gl.CallList", (error > 0) ? "over" : "under");
@@ -6373,6 +6791,7 @@ int LuaOpenGL::DeleteList(lua_State* L)
 int LuaOpenGL::Flush(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	glFlush();
 	return 0;
 }
@@ -6384,6 +6803,7 @@ int LuaOpenGL::Flush(lua_State* L)
 int LuaOpenGL::Finish(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	if (InsideBatch()) return 0;
 	glFinish();
 	return 0;
 }

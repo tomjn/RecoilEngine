@@ -115,6 +115,21 @@ bool glSpringBlitImages(
  */
 void glBeginBatch(GLenum mode);
 
+/**
+ * Draws a rectangle and separates it from whatever comes next.
+ *
+ * Identical to glRectf() except where the driver mis-renders batches, in which
+ * case the pending work is submitted afterwards.
+ *
+ * glRectf is an immediate-mode primitive that glBeginBatch never wrapped, so
+ * nothing has ever separated one from a following draw. That went unnoticed
+ * while the draws around it were immediate mode too, since those separate
+ * themselves. A glDrawArrays after one loses its geometry entirely, measured at
+ * 30 dirty frames of 30 against 0 of 30 with a flush between, so any caller
+ * followed by CVertexArray or by buffered Lua drawing is affected.
+ */
+void glRectBatch(float x1, float y1, float x2, float y2);
+
 void ClearScreen();
 
 bool ProgramStringIsNative(GLenum target, const char* filename);

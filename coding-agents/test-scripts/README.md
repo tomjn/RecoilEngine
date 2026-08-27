@@ -97,7 +97,7 @@ These need no engine run, so use them first where they can answer the question.
 |---|---|
 | `fill_probe.c` | the driver's fill rate, and the cost of a render pass break. A break is a full attachment store and reload at memory bandwidth, 0.266ms at 3024x1832 |
 | `kk_mipmap_leak.c` | the KosmicKrisp memory leak, attached to the upstream issue |
-| `batch_merge_probe.c` | whether a defect that affects `glBegin` batches also affects `glDrawArrays`. Carries a positive control, so a run that fails to reproduce the known artefact says so instead of reading as a clean result |
+| `batch_merge_probe.c` | which driver defects follow `glDrawArrays`, display lists and textured batches. Carries a positive control, so a run that fails to reproduce the known artefact says so instead of reading as a clean result. `--dump <dir>` writes frames as PPM, because a pixel count says how much is wrong and never what it looks like |
 
 GL timer queries do not work here, so do not reach for them. Zink on KosmicKrisp does not advertise `GL_ARB_timer_query` and `glQueryCounter` silently returns zeros.
 

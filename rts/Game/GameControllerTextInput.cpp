@@ -73,7 +73,7 @@ void GameControllerTextInput::Draw() {
 
 		glDisable(GL_TEXTURE_2D);
 		glColor4f(caretIllum, caretIllum, caretIllum, 0.75f);
-		glRectf(caretScrPos, inputTextPosY, caretScrPos + caretWidth, inputTextPosY + caretHeight);
+		glRectBatch(caretScrPos, inputTextPosY, caretScrPos + caretWidth, inputTextPosY + caretHeight);
 		glEnable(GL_TEXTURE_2D);
 	}
 

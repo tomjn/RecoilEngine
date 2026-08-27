@@ -647,6 +647,22 @@ Verified on the resource bar: the four panel accents, all four icons and the res
 
 1.67x slower here against 4.7x measured at 5120x2754, so most of what looked catastrophic was the window size. Run the harness windowed and small.
 
+> **Does not reproduce on the current pin, 2026-08-26.** Five consecutive 100 second runs of Splinter Faction from the fixed start script, windowed at 1400x850, peaked at 5934, 6013, 6062, 6197 and 6440 MiB of `phys_footprint` and all exited cleanly. `run-capped.sh` caps on footprint at 20 GiB and never fired once. At 5 GiB a second that cap trips in four seconds.
+>
+> The figures below carry no Mesa commit, which is exactly the trap `kk_mipmap_leak.c`'s header warns about, and they were taken before the pin existed. The most likely reading is that pinning to `56588ef0665` fixed this and nobody went back to check. What is *not* established is whether it is absent at other resolutions or on a busier scene, since these five runs are one scene with one unit. Treat the section below as a description of a Mesa that is no longer being used.
+>
+> An outside contributor measured 11 GiB peak on KosmicKrisp against 7.3 GiB on MoltenVK, same engine and same demo, on a base five weeks older than our pin, and 13.6 GiB with `c08dba83025` applied. All three ran five minutes to completion. Those are RSS rather than `phys_footprint`, so read them as a floor, but a Metal 4 run completing at all is hard to square with death at twelve seconds.
+>
+> **It is not the engine's immediate-mode volume either, tested 2026-08-26.** The obvious suspect was that buffering and compiled lists cut Lua drawing enough to hide the growth, so the old path was run on the current pin: `LuaImmediateModeBuffering = 0` and `LuaDisplayListMode = 0`, which is the engine as it stood when the figures below were recorded. 122 seconds, peak 7927 MiB, no death.
+>
+> | Configuration, current pin, Splinter Faction fixed start, 1400x850 | fps | peak footprint |
+> |---|---|---|
+> | buffering off, lists deferred | 16.7 | 7927 MiB |
+> | buffering on, lists deferred | 16.3 | 6062 MiB |
+> | buffering on, lists compiled, the default | 33.7 | 6440 MiB |
+>
+> Immediate mode costs about 1.5 GB of footprint, which is real and bounded, and nothing like a leak. So the difference between then and now is the Mesa, not the engine. The fps column is also the cleanest measure of what the batching branch bought: 2x, and almost all of it display lists rather than buffering.
+
 **There is a severe memory leak, around 5 GiB per second, and RSS cannot see it.**
 
 GPU and system memory are the same silicon on Apple Silicon, so IOAccelerator allocations are real pressure. `ps -o rss` does not count them. Measured on one run, `phys_footprint` against RSS at the same instants:
@@ -664,7 +680,7 @@ RSS is flat at about 1.3 GiB the whole time. This is why an earlier claim here t
 
 Use `phys_footprint` for anything memory related here. `run-capped.sh` caps on it at 20 GiB, which clears the roughly 10 GiB that loading alone needs while stopping far short of a freeze, and logs RSS, `top`'s MEM and footprint side by side. `top`'s MEM counts reserved address space and is not a pressure measure either.
 
-This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.
+~~This is now the largest open problem in the port. It bounds every run to a few tens of seconds and it is the reason long sessions are not possible.~~ **Not true on the current pin.** 100 second runs are routine and hold steady around 6 GiB. Keep using `run-capped.sh` regardless, because the ceiling costs nothing and an uncapped run once froze a machine.
 
 **Ruled out, each by measurement. Do not retry these.**
 
@@ -1256,7 +1272,7 @@ The flush suppresses it completely. `normalise` does nothing for it whatsoever. 
 
 **Two scoring mistakes, both of which produced confident zeroes, do not repeat them.** Scoring by excess over the run's minimum fails if any frame was captured before the widget drew, because that frame becomes the reference and every other frame scores the entire drawing as excess: one run read about 10,000 in every cell. It fails again, in the opposite direction, once the artefact is in every frame, because then there is no clean frame to subtract and the run reads zero everywhere while the screen is visibly full of stray lines. `minimap_score.py` now counts absolutely, using the fact that the grid is regular and known, so every legitimate pixel lies at the circle radius from a node. A histogram over one frame put 79,711 pixels on the ring and 32 off it.
 
-**Compiled display lists are worth 5.1x and are still blocked, 2026-08-04.** `SPRING_COMPILE_LISTS=1` ignores the deferral and compiles as normal. Metal Factions goes from 8.97 to 46.0 fps, 111.5ms to 21.7ms, and Lua vertices a frame fall from 790,748 to 147. SplinterFaction roughly doubles, 15.2 to 30 fps. ~~`normalise` clears the build menu polygon that compilation reintroduces.~~ **Retracted, it does not, see below.** What still blocks it is the resource bar's research readout, which is lost under compilation and is **not** a display list problem: `gui_static_resourcebar.lua:773` draws that panel immediate-mode outside any list, and the numbers that are inside the lists render correctly.
+**Compiled display lists are worth 5.1x and are still blocked, 2026-08-04.** ~~still blocked~~ **Unblocked 2026-08-26, see the superseded note below.** `SPRING_COMPILE_LISTS=1` ignores the deferral and compiles as normal. Metal Factions goes from 8.97 to 46.0 fps, 111.5ms to 21.7ms, and Lua vertices a frame fall from 790,748 to 147. SplinterFaction roughly doubles, 15.2 to 30 fps. ~~`normalise` clears the build menu polygon that compilation reintroduces.~~ **Retracted, it does not, see below.** What still blocks it is the resource bar's research readout, which is lost under compilation and is **not** a display list problem: `gui_static_resourcebar.lua:773` draws that panel immediate-mode outside any list, and the numbers that are inside the lists render correctly.
 
 **`SPRING_BATCH_NORMALISE` must not default on. On top of the flush it reintroduces batch merging, measured 2026-08-04.** One interleaved run, four cells, 53 shots, scored absolutely against the known grid:
 
@@ -1296,6 +1312,8 @@ So the engine issues a correct, well-formed draw and the driver does not render 
 
 **Method note.** The engine cannot tell which Lua draw is which, so the widget echoed a marker either side of the panel and the markers and the font log were read interleaved by timestamp. That is what identified the lost draw as the one submitting 42 indices, and it is worth reaching for before adding more instrumentation.
 
+> **Superseded 2026-08-26. Compiled display lists ship now.** Everything in this subsection was measured with Lua drawing still going through `glBegin`, and it was correct for that configuration. Buffering removed `glBegin` from the Lua path entirely, so there are no immediate-mode batches left inside a list to merge, and the build menu draws correctly compiled. A different fault then appeared, was found, and was fixed. Read on for what was true on the old path, then see [MACOS_PERFORMANCE.md](MACOS_PERFORMANCE.md) for what replaced it.
+
 **Compiled display lists cannot ship. The build menu's content area is destroyed and no mitigation reaches it, settled 2026-08-04.** This retracts the earlier claim above that `normalise` clears the artefact compilation reintroduces. It does not.
 
 The artefact only appears while the menu is scrolling, because `gui_static_buildordermenu.lua` marks itself dirty on every scroll step and `BakeStaticLayer` deletes and recompiles `buildList`. A frozen scene compiles it once and never again, so a frozen A/B measures two clean frames and reads as "no artefact". Driving the scroll from the widget's own `Update` reproduces it at will.
@@ -1313,14 +1331,16 @@ Neither mitigation is distinguishable from baseline, and the baseline rate itsel
 
 **Why no flush can fix this, and why the deferral exists.** `glBeginBatch`'s flush executes during compilation and is never recorded, so a list carries no per-batch separation at all, and nothing at replay can insert any. `SPRING_LIST_FLUSH` flushing either side of the compile and after `glCallList` does not help, because the batches inside the list were already merged when it was built. So the 5.1x on Metal Factions is not available on this driver: compiled lists render the game's own interface wrong.
 
-**What ships is unchanged: uniform arity plus the per-batch flush plus the deferral.** `SPRING_BATCH_NORMALISE` stays off, `SPRING_COMPILE_LISTS` stays off, and `SPRING_LIST_FLUSH` only matters if compiled lists are ever revisited.
+> **This paragraph is why the wedge took a session to find, so it is worth being precise about what it got right.** The diagnosis is correct: on the `glBegin` path the batches really were merged before `glEndList`, and no flush at replay can unmerge them. What does not follow is the general claim that no flush can ever fix a display list fault. Buffering removes the merging entirely, and the fault that appeared afterwards is a different one that a flush around `glCallList` does fix. `SPRING_LIST_FLUSH` failing here was taken as evidence against flushing lists in general, and it was only evidence about merged `glBegin` batches.
+
+**What shipped at the time: uniform arity plus the per-batch flush plus the deferral.** ~~`SPRING_BATCH_NORMALISE` stays off, `SPRING_COMPILE_LISTS` stays off~~. **Superseded.** Lua drawing is buffered, the deferral is gone, and `LuaDisplayListMode` replaces `SPRING_COMPILE_LISTS` with a config option defaulting to compiled.
 
 **Method notes that cost time today.** A game with factions picks one at random per run unless the start script sets `side`, and two runs then differ in commander, unit set and any number the UI displays, which is not a rendering difference. Fog of war means world-space overlays cannot be compared by brightness unless the scene is identical. And `install-probe.sh --move` sends the unit to the middle of the map and tracks it, which removes the faction from the camera framing entirely and exercises overlays a frozen scene never draws. Frame rates in that mode are void.
 
 **Start here next, in this order.**
 
 1. ~~**Decide whether the flush goes back on by default.**~~ **Done.** The flush ships on. `normalise` stays opt-in, because on top of the flush it reintroduces merging, see above. What ships is arity plus the flush.
-2. ~~**Find why compiled lists lose the research readout.**~~ **Done.** `SPRING_LIST_FLUSH=1` restores it for no measurable cost. It does not matter in practice, because compiled lists cannot ship for a separate reason, see above.
+2. ~~**Find why compiled lists lose the research readout.**~~ **Done.** `SPRING_LIST_FLUSH=1` restores it for no measurable cost. It does not matter in practice, because compiled lists cannot ship for a separate reason, see above. **That separate reason went away on 2026-08-26 and compiled lists ship now.**
 3. **Find which widgets cost the time.** `luaui disable` is all or nothing across 167 widgets in SplinterFaction and 69 in Metal Factions. Two smaller leads from watching a live game: the build menu costs about 10 fps reliably when opened, and deselecting the starting unit gains about 10.
 
 **Done, do not repeat.** `luaui disable` after the freeze, twice, in two games. Metal Factions, which now has a start script and runs. Whether a 60Hz display caps the frame rate, which it does not. Whether uniform arity alone fixes batch merging, which it does not. Whether `normalise` fixes batch merging, which it does not, and whether it should default on, which it should not.

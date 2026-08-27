@@ -3173,7 +3173,7 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 			glBlendFunc(GL_DST_COLOR, GL_ZERO);
 			glColor4f(0.5f, 0.5f, 0.5f, 0.5f);
 			const Box& vb = icon.visual;
-			glRectf(vb.x1, vb.y1, vb.x2, vb.y2);
+			glRectBatch(vb.x1, vb.y1, vb.x2, vb.y2);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		}
 
@@ -3230,7 +3230,7 @@ void CGuiHandler::DrawMenuName() // Only called by drawbuttons
 		const float textHeight = fontScale * font->GetTextHeight(menuName) * globalRendering->pixelY;
 		glDisable(GL_TEXTURE_2D);
 		glColor4f(0.2f, 0.2f, 0.2f, guiAlpha);
-		glRectf(buttonBox.x1,
+		glRectBatch(buttonBox.x1,
 		        buttonBox.y2,
 		        buttonBox.x2,
 		        buttonBox.y2 + textHeight + (yIconSize * 0.25f));
@@ -3266,7 +3266,7 @@ void CGuiHandler::DrawSelectionInfo()
 
 			glDisable(GL_TEXTURE_2D);
 			glColor4f(0.2f, 0.2f, 0.2f, guiAlpha);
-			glRectf(xSelectionPos - frameBorder,
+			glRectBatch(xSelectionPos - frameBorder,
 			        ySelectionPos - frameBorder,
 			        xSelectionPos + frameBorder + textWidth,
 			        ySelectionPos + frameBorder + textHeight);
@@ -3295,10 +3295,10 @@ void CGuiHandler::DrawNumberInput() // Only called by drawbuttons
 			const float slideX = std::min(std::max(mouseX, 0.25f), 0.75f);
 			//const float mouseY = 1.0f - (float)(mouse->lasty - 16) / (float)globalRendering->viewSizeY;
 			glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
-			glRectf(0.235f, 0.45f, 0.25f, 0.55f);
-			glRectf(0.75f, 0.45f, 0.765f, 0.55f);
+			glRectBatch(0.235f, 0.45f, 0.25f, 0.55f);
+			glRectBatch(0.75f, 0.45f, 0.765f, 0.55f);
 			glColor4f(0.0f, 0.0f, 1.0f, 0.8f);
-			glRectf(0.25f, 0.49f, 0.75f, 0.51f);
+			glRectBatch(0.25f, 0.49f, 0.75f, 0.51f);
 			glBeginBatch(GL_TRIANGLES);
 				glColor4f(1.0f, 0.0f, 0.0f, 1.0f);
 				glVertex2f(slideX + 0.015f, 0.55f);
@@ -3400,7 +3400,7 @@ void CGuiHandler::DrawOptionLEDs(const IconInfo& icon)
 		const float startx = x1 + (xs * float(1 + (2 * x)));
 		const float starty = y2 + (3.0f * yp) + textBorder;
 
-		glRectf(startx, starty, startx + xs, starty + ys);
+		glRectBatch(startx, starty, startx + xs, starty + ys);
 
 		glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
 		glBeginBatch(GL_LINE_LOOP);
@@ -4280,7 +4280,7 @@ static void FullScreenDraw()
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 	glPushMatrix();
-	glRectf(-1.0f, -1.0f, +1.0f, +1.0f);
+	glRectBatch(-1.0f, -1.0f, +1.0f, +1.0f);
 	glMatrixMode(GL_PROJECTION);
 	glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);
